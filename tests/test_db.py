@@ -207,6 +207,47 @@ class TestAnalysis:
         assert unanalyzed[0].title == "Python Developer"
 
 
+class TestAnalysisListSerialization:
+    """Test that list fields survive the DB round-trip."""
+
+    def test_empty_lists_round_trip(self, conn, sample_listing):
+        listing_id = upsert_listing(conn, sample_listing)
+        analysis = AnalysisResult(
+            listing_id=listing_id,
+            match_score=50,
+            match_reasons=[],
+            missing_skills=[],
+            strengths=[],
+            concerns=[],
+            profile_hash="hash1",
+        )
+        save_analysis(conn, analysis)
+        result = get_analysis(conn, listing_id)
+        assert result.match_reasons == []
+        assert result.missing_skills == []
+        assert result.strengths == []
+        assert result.concerns == []
+
+    def test_multi_item_lists_round_trip(self, conn, sample_listing):
+        listing_id = upsert_listing(conn, sample_listing)
+        reasons = ["Skill match", "Location match", "Experience level"]
+        analysis = AnalysisResult(
+            listing_id=listing_id,
+            match_score=90,
+            match_reasons=reasons,
+            missing_skills=["Docker", "Kubernetes"],
+            strengths=["Python", "JS"],
+            concerns=["Junior", "No CI/CD experience"],
+            profile_hash="hash2",
+        )
+        save_analysis(conn, analysis)
+        result = get_analysis(conn, listing_id)
+        assert result.match_reasons == reasons
+        assert result.missing_skills == ["Docker", "Kubernetes"]
+        assert result.strengths == ["Python", "JS"]
+        assert result.concerns == ["Junior", "No CI/CD experience"]
+
+
 class TestStats:
     def test_basic_stats(self, conn, sample_listing):
         id1 = upsert_listing(conn, sample_listing)
