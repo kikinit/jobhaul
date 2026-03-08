@@ -21,6 +21,23 @@ class LLMConfig(BaseModel):
     model: str = "claude-sonnet-4-20250514"
 
 
+class Flags(BaseModel):
+    boost: list[str] = Field(default_factory=list)
+    warn: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+
+
+class ScrapingConfig(BaseModel):
+    delay_min: float = 3.0
+    delay_max: float = 7.0
+    max_requests_per_run: int = 50
+    proxy: str | None = None
+
+
+class AnalysisConfig(BaseModel):
+    pre_screen_threshold: float = 0.1
+
+
 class Profile(BaseModel):
     name: str
     roles: list[str] = Field(default_factory=list)
@@ -36,8 +53,21 @@ class Profile(BaseModel):
     languages: list[LanguageEntry] = Field(default_factory=list)
     summary: str = ""
     exclusions: list[str] = Field(default_factory=list)
+    flags: Flags = Field(default_factory=Flags)
     sources: dict[str, SourceConfig] = Field(default_factory=dict)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+
+    def get_effective_flags(self) -> Flags:
+        """Get flags, treating legacy exclusions as flags.warn if flags.warn is empty."""
+        if self.exclusions and not self.flags.warn:
+            return Flags(
+                boost=self.flags.boost,
+                warn=self.exclusions,
+                exclude=self.flags.exclude,
+            )
+        return self.flags
 
 
 class JobListing(BaseModel):

@@ -53,9 +53,17 @@ summary: >
   full-stack with SvelteKit and React. Based in Stockholm, open to remote.
   Has enskild firma for contract/consulting work.
 
-exclusions:
-  - gambling
-  - defense
+flags:
+  boost:
+    - AI
+    - startup
+    - remote
+    - SvelteKit
+  warn:
+    - defense
+    - gambling
+    - bemanningsföretag
+  exclude: []
 
 sources:
   platsbanken:
@@ -69,7 +77,16 @@ sources:
   linkedin:
     enabled: false  # requires: pip install playwright && playwright install chromium
   indeed:
-    enabled: false
+    enabled: false  # requires: pip install playwright && playwright install chromium
+
+scraping:
+  delay_min: 3.0
+  delay_max: 7.0
+  max_requests_per_run: 50
+  proxy: null
+
+analysis:
+  pre_screen_threshold: 0.1
 
 llm:
   adapter: claude-cli
