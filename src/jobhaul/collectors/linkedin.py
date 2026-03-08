@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 
 from jobhaul.collectors.base import Collector, detect_remote
 from jobhaul.collectors.registry import register
+from jobhaul.collectors.stealth import (
+    CircuitBreaker,
+    RequestCounter,
+    create_stealth_context,
+    random_delay,
+)
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
 logger = get_logger(__name__)
 
 SEARCH_URL = "https://www.linkedin.com/jobs/search/"
-RATE_LIMIT_DELAY = 3.0  # seconds between page loads
 MAX_PAGES = 3
 RESULTS_PER_PAGE = 25
 
@@ -35,29 +39,47 @@ class LinkedInCollector(Collector):
                 errors=["Playwright not installed. Run: pip install playwright && playwright install chromium"],
             )
 
+        scraping = profile.scraping
         listings: list[RawListing] = []
         errors: list[str] = []
         seen_ids: set[str] = set()
+        circuit_breaker = CircuitBreaker()
+        request_counter = RequestCounter(scraping.max_requests_per_run)
 
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-                page = await context.new_page()
 
                 for term in profile.search_terms:
+                    if circuit_breaker.is_open:
+                        msg = "LinkedIn: circuit breaker open, aborting remaining searches"
+                        logger.warning(msg)
+                        errors.append(msg)
+                        break
+                    if request_counter.limit_reached:
+                        msg = "LinkedIn: request limit reached, stopping"
+                        logger.warning(msg)
+                        errors.append(msg)
+                        break
+
+                    # New context per search term for session isolation
+                    context = await create_stealth_context(browser, scraping)
+                    page = await context.new_page()
+
                     try:
                         term_listings = await self._search_term(
                             page, term, profile.location, seen_ids,
+                            scraping, circuit_breaker, request_counter,
                         )
                         listings.extend(term_listings)
                     except Exception as e:
                         msg = f"LinkedIn error searching '{term}': {e}"
                         logger.warning(msg)
                         errors.append(msg)
-                    await asyncio.sleep(RATE_LIMIT_DELAY)
+                        circuit_breaker.record_failure()
+
+                    await context.close()
+                    await random_delay(scraping.delay_min, scraping.delay_max)
 
                 await browser.close()
 
@@ -75,18 +97,27 @@ class LinkedInCollector(Collector):
         term: str,
         location: str,
         seen_ids: set[str],
+        scraping,
+        circuit_breaker: CircuitBreaker,
+        request_counter: RequestCounter,
     ) -> list[RawListing]:
         listings: list[RawListing] = []
 
         for page_num in range(MAX_PAGES):
+            if circuit_breaker.is_open or request_counter.limit_reached:
+                break
+
             start = page_num * RESULTS_PER_PAGE
             url = f"{SEARCH_URL}?keywords={term}&location={location}&start={start}"
 
             try:
+                request_counter.increment()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)  # wait for JS rendering
+                circuit_breaker.record_success()
             except Exception as e:
                 logger.warning("LinkedIn page load failed: %s", e)
+                circuit_breaker.record_failure()
                 break
 
             job_cards = await page.query_selector_all(".base-card")
@@ -105,7 +136,7 @@ class LinkedInCollector(Collector):
             if len(job_cards) < RESULTS_PER_PAGE:
                 break
 
-            await asyncio.sleep(RATE_LIMIT_DELAY)
+            await random_delay(scraping.delay_min, scraping.delay_max)
 
         return listings
 
