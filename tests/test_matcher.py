@@ -12,6 +12,7 @@ from jobhaul.analysis.matcher import (
     build_prompt,
     compute_profile_hash,
     parse_llm_response,
+    pre_screen,
 )
 from jobhaul.models import JobListing, Profile
 
@@ -20,10 +21,25 @@ class MockAdapter(LLMAdapter):
     def __init__(self, response: str):
         self.response = response
         self.last_prompt = None
+        self.call_count = 0
 
     async def analyze(self, prompt: str) -> str:
         self.last_prompt = prompt
+        self.call_count += 1
         return self.response
+
+
+class RetryMockAdapter(LLMAdapter):
+    """Returns invalid response first, then valid on retry."""
+
+    def __init__(self, first: str, second: str):
+        self.responses = [first, second]
+        self.call_count = 0
+
+    async def analyze(self, prompt: str) -> str:
+        idx = min(self.call_count, len(self.responses) - 1)
+        self.call_count += 1
+        return self.responses[idx]
 
 
 @pytest.fixture
@@ -111,6 +127,86 @@ class TestParseLLMResponse:
         with pytest.raises(json.JSONDecodeError):
             parse_llm_response("not json at all")
 
+    def test_parse_empty_response(self):
+        """Issue #4: Handle empty responses gracefully."""
+        with pytest.raises(json.JSONDecodeError):
+            parse_llm_response("")
+
+    def test_parse_whitespace_only(self):
+        with pytest.raises(json.JSONDecodeError):
+            parse_llm_response("   \n  ")
+
+    def test_parse_json_in_mixed_text(self):
+        """Issue #4: Extract JSON from mixed text."""
+        response = 'Here is my analysis:\n{"match_score": 42, "summary": "OK"}\nThanks!'
+        result = parse_llm_response(response)
+        assert result["match_score"] == 42
+
+    def test_parse_json_with_preamble(self):
+        response = 'Sure! Here is the JSON:\n\n{"match_score": 55}'
+        result = parse_llm_response(response)
+        assert result["match_score"] == 55
+
+
+class TestPreScreen:
+    """Tests for pre-screening before LLM analysis (Issue #9)."""
+
+    def test_high_match(self, profile):
+        listing = JobListing(
+            id=1,
+            title="Python Developer",
+            description="JavaScript and Python developer needed for Stockholm team",
+            sources=["platsbanken"],
+            created_at="2024-01-01",
+        )
+        score = pre_screen(listing, profile)
+        assert score > 0.0
+
+    def test_no_match(self, profile):
+        listing = JobListing(
+            id=1,
+            title="Tandläkare",
+            description="Vi söker en erfaren tandläkare till vår klinik",
+            sources=["platsbanken"],
+            created_at="2024-01-01",
+        )
+        score = pre_screen(listing, profile)
+        assert score == 0.0
+
+    def test_partial_match(self, profile):
+        listing = JobListing(
+            id=1,
+            title="Python Backend Developer",
+            description="Building APIs with Python and Django",
+            sources=["platsbanken"],
+            created_at="2024-01-01",
+        )
+        score = pre_screen(listing, profile)
+        assert 0.0 < score < 1.0
+
+    def test_no_terms_passes_everything(self):
+        profile = Profile(name="Test")
+        listing = JobListing(
+            id=1,
+            title="Anything",
+            description="Whatever",
+            sources=["platsbanken"],
+            created_at="2024-01-01",
+        )
+        score = pre_screen(listing, profile)
+        assert score == 1.0
+
+    def test_case_insensitive(self, profile):
+        listing = JobListing(
+            id=1,
+            title="PYTHON DEVELOPER",
+            description="",
+            sources=["platsbanken"],
+            created_at="2024-01-01",
+        )
+        score = pre_screen(listing, profile)
+        assert score > 0.0
+
 
 class TestAnalyzeListing:
     @pytest.mark.asyncio
@@ -168,3 +264,25 @@ class TestAnalyzeListing:
         adapter = MockAdapter(json.dumps({"match_score": -10}))
         result = await analyze_listing(listing, profile, adapter)
         assert result.match_score == 0
+
+    @pytest.mark.asyncio
+    async def test_retry_on_parse_failure(self, listing, profile):
+        """Issue #4: Retry once with clearer prompt on parse failure."""
+        valid_data = json.dumps({"match_score": 77, "summary": "OK"})
+        adapter = RetryMockAdapter("not json", valid_data)
+
+        result = await analyze_listing(listing, profile, adapter)
+
+        assert adapter.call_count == 2
+        assert result.match_score == 77
+
+    @pytest.mark.asyncio
+    async def test_retry_also_fails(self, listing, profile):
+        """If both attempts fail, return a zero-score result."""
+        adapter = RetryMockAdapter("not json", "still not json")
+
+        result = await analyze_listing(listing, profile, adapter)
+
+        assert adapter.call_count == 2
+        assert result.match_score == 0
+        assert "failed" in result.summary.lower()

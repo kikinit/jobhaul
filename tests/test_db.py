@@ -5,12 +5,14 @@ from __future__ import annotations
 import pytest
 
 from jobhaul.db.queries import (
+    _normalize_for_dedup,
     find_duplicate,
     get_analysis,
     get_listing,
     get_stats,
     get_unanalyzed_listings,
     list_listings,
+    merge_existing_duplicates,
     save_analysis,
     upsert_listing,
 )
@@ -246,6 +248,192 @@ class TestAnalysisListSerialization:
         assert result.missing_skills == ["Docker", "Kubernetes"]
         assert result.strengths == ["Python", "JS"]
         assert result.concerns == ["Junior", "No CI/CD experience"]
+
+
+class TestNormalizeForDedup:
+    """Test improved dedup normalization (Issue #1)."""
+
+    def test_trailing_space(self):
+        assert _normalize_for_dedup("Python Developer  ") == "python developer"
+
+    def test_leading_space(self):
+        assert _normalize_for_dedup("  Python Developer") == "python developer"
+
+    def test_mixed_case(self):
+        assert _normalize_for_dedup("PYTHON Developer") == "python developer"
+
+    def test_non_breaking_space(self):
+        assert _normalize_for_dedup("Python\u00a0Developer") == "python developer"
+
+    def test_tabs_and_newlines(self):
+        assert _normalize_for_dedup("Python\t\nDeveloper") == "python developer"
+
+    def test_multiple_spaces_collapsed(self):
+        assert _normalize_for_dedup("Python    Developer") == "python developer"
+
+    def test_empty_string(self):
+        assert _normalize_for_dedup("") == ""
+
+    def test_none(self):
+        assert _normalize_for_dedup(None) == ""
+
+    def test_unicode_whitespace(self):
+        # \u2003 is em space, \u200b is zero-width space
+        assert _normalize_for_dedup("Python\u2003Developer\u200b") == "python developer"
+
+
+class TestDedupWithWhitespace:
+    """Test that dedup catches whitespace/case variations (Issue #1)."""
+
+    def test_dedup_trailing_space(self, conn, sample_listing):
+        id1 = upsert_listing(conn, sample_listing)
+        dup = sample_listing.model_copy(
+            update={
+                "title": "Python Developer ",
+                "source": "jooble",
+                "external_id": "j-1",
+            }
+        )
+        id2 = upsert_listing(conn, dup)
+        assert id1 == id2
+
+    def test_dedup_non_breaking_space(self, conn, sample_listing):
+        id1 = upsert_listing(conn, sample_listing)
+        dup = sample_listing.model_copy(
+            update={
+                "title": "Python\u00a0Developer",
+                "source": "jooble",
+                "external_id": "j-2",
+            }
+        )
+        id2 = upsert_listing(conn, dup)
+        assert id1 == id2
+
+    def test_dedup_tabs(self, conn, sample_listing):
+        id1 = upsert_listing(conn, sample_listing)
+        dup = sample_listing.model_copy(
+            update={
+                "title": "Python\tDeveloper",
+                "source": "remoteok",
+                "external_id": "r-3",
+            }
+        )
+        id2 = upsert_listing(conn, dup)
+        assert id1 == id2
+
+
+class TestMergeExistingDuplicates:
+    """Test duplicate merge on DB init (Issue #1)."""
+
+    def test_merge_duplicates(self, tmp_path):
+        import sqlite3
+
+        from jobhaul.db.schema import SCHEMA_SQL
+
+        db_path = str(tmp_path / "test_merge.db")
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+
+        # Insert two listings that should be duplicates
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (1, 'Python Dev', 'Acme', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (2, 'python dev', 'acme', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'platsbanken', 'e1')"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (2, 'jooble', 'e2')"
+        )
+        conn.commit()
+
+        merged = merge_existing_duplicates(conn)
+        assert merged == 1
+
+        # Only one listing should remain
+        count = conn.execute("SELECT COUNT(*) as c FROM listings").fetchone()["c"]
+        assert count == 1
+
+        # Both sources should be on the remaining listing
+        sources = conn.execute(
+            "SELECT source FROM listing_sources WHERE listing_id = 1"
+        ).fetchall()
+        source_names = {r["source"] for r in sources}
+        assert source_names == {"platsbanken", "jooble"}
+
+        conn.close()
+
+
+class TestListSortByScore:
+    """Test sort_by_score in list_listings (Issue #8)."""
+
+    def test_sort_by_score_desc(self, conn, sample_listing):
+        # Insert three listings with different scores
+        id1 = upsert_listing(conn, sample_listing)
+        id2 = upsert_listing(
+            conn,
+            sample_listing.model_copy(
+                update={"title": "React Dev", "external_id": "ext-2"}
+            ),
+        )
+        id3 = upsert_listing(
+            conn,
+            sample_listing.model_copy(
+                update={"title": "Go Dev", "external_id": "ext-3"}
+            ),
+        )
+
+        save_analysis(conn, AnalysisResult(listing_id=id1, match_score=50, profile_hash="h"))
+        save_analysis(conn, AnalysisResult(listing_id=id2, match_score=90, profile_hash="h"))
+        save_analysis(conn, AnalysisResult(listing_id=id3, match_score=70, profile_hash="h"))
+
+        listings = list_listings(conn, sort_by_score=True)
+        scores = [
+            get_analysis(conn, l.id).match_score for l in listings
+        ]
+        assert scores == [90, 70, 50]
+
+    def test_no_analysis_at_bottom(self, conn, sample_listing):
+        id1 = upsert_listing(conn, sample_listing)
+        id2 = upsert_listing(
+            conn,
+            sample_listing.model_copy(
+                update={"title": "React Dev", "external_id": "ext-2"}
+            ),
+        )
+
+        # Only analyze listing 2
+        save_analysis(conn, AnalysisResult(listing_id=id2, match_score=80, profile_hash="h"))
+
+        listings = list_listings(conn, sort_by_score=True)
+        assert listings[0].id == id2  # Analyzed listing first
+        assert listings[1].id == id1  # No analysis at bottom
+
+
+class TestListListingsSources:
+    """Test that sources are properly populated (Issue #3)."""
+
+    def test_sources_populated_in_list(self, conn, sample_listing):
+        upsert_listing(conn, sample_listing)
+        dup = sample_listing.model_copy(
+            update={"source": "remoteok", "external_id": "r-1"}
+        )
+        upsert_listing(conn, dup)
+
+        listings = list_listings(conn)
+        assert len(listings) == 1
+        assert sorted(listings[0].sources) == ["platsbanken", "remoteok"]
+
+    def test_single_source(self, conn, sample_listing):
+        upsert_listing(conn, sample_listing)
+        listings = list_listings(conn)
+        assert len(listings) == 1
+        assert listings[0].sources == ["platsbanken"]
 
 
 class TestStats:

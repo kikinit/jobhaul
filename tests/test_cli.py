@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from jobhaul.cli import app
-from jobhaul.models import AnalysisResult, RawListing
+from jobhaul.models import AnalysisResult, Profile, RawListing
 
 runner = CliRunner()
 
@@ -26,6 +26,20 @@ def mock_db(tmp_path):
         yield conn
 
     conn.close()
+
+
+@pytest.fixture
+def mock_profile():
+    """Mock load_profile to return a test profile."""
+    profile = Profile(
+        name="Test",
+        roles=["developer"],
+        search_terms=["python"],
+        skills=["Python"],
+        location="Stockholm",
+    )
+    with patch("jobhaul.cli.load_profile", return_value=profile):
+        yield profile
 
 
 @pytest.fixture
@@ -51,12 +65,12 @@ def profile_file(tmp_path):
 
 
 class TestListCommand:
-    def test_list_empty(self, mock_db):
+    def test_list_empty(self, mock_db, mock_profile):
         result = runner.invoke(app, ["list"])
         assert result.exit_code == 0
         assert "No listings found" in result.output
 
-    def test_list_with_data(self, mock_db):
+    def test_list_with_data(self, mock_db, mock_profile):
         from jobhaul.db.queries import upsert_listing
 
         upsert_listing(
@@ -74,12 +88,12 @@ class TestListCommand:
 
 
 class TestShowCommand:
-    def test_show_not_found(self, mock_db):
+    def test_show_not_found(self, mock_db, mock_profile):
         result = runner.invoke(app, ["show", "999"])
         assert result.exit_code == 1
         assert "not found" in result.output
 
-    def test_show_existing(self, mock_db):
+    def test_show_existing(self, mock_db, mock_profile):
         from jobhaul.db.queries import upsert_listing
 
         listing_id = upsert_listing(
@@ -126,8 +140,6 @@ class TestStatsCommand:
 class TestConfigCommands:
     def test_config_show(self, profile_file):
         with patch("jobhaul.cli.load_profile") as mock_load:
-            from jobhaul.models import Profile
-
             mock_load.return_value = Profile(name="Test", skills=["Python"])
             result = runner.invoke(app, ["config", "show"])
             assert result.exit_code == 0
@@ -141,10 +153,83 @@ class TestConfigCommands:
             assert result.exit_code == 1
 
 
+class TestListCommandWithFlags:
+    def test_list_shows_flags_column(self, mock_db):
+        from jobhaul.db.queries import upsert_listing
+        from jobhaul.models import Flags
+
+        upsert_listing(
+            mock_db,
+            RawListing(
+                title="AI Developer",
+                company="Startup Inc",
+                description="Build AI products",
+                source="platsbanken",
+                external_id="1",
+            ),
+        )
+
+        profile = Profile(
+            name="Test",
+            flags=Flags(boost=["AI", "startup"]),
+        )
+        with patch("jobhaul.cli.load_profile", return_value=profile):
+            result = runner.invoke(app, ["list"])
+            assert result.exit_code == 0
+            assert "AI" in result.output
+            assert "Flags" in result.output  # Column header exists
+
+
+class TestListCommandSortByScore:
+    def test_top_sorts_by_score(self, mock_db, mock_profile):
+        from jobhaul.db.queries import save_analysis, upsert_listing
+
+        id1 = upsert_listing(
+            mock_db,
+            RawListing(title="Low Score", company="Co", source="p", external_id="1"),
+        )
+        id2 = upsert_listing(
+            mock_db,
+            RawListing(title="High Score", company="Co", source="p", external_id="2"),
+        )
+        save_analysis(mock_db, AnalysisResult(listing_id=id1, match_score=30, profile_hash="h"))
+        save_analysis(mock_db, AnalysisResult(listing_id=id2, match_score=90, profile_hash="h"))
+
+        result = runner.invoke(app, ["list", "--top", "2"])
+        assert result.exit_code == 0
+        # High Score should appear before Low Score
+        output = result.output
+        high_pos = output.find("High Score")
+        low_pos = output.find("Low Score")
+        assert high_pos < low_pos
+
+
+class TestShowCommandWithFlags:
+    def test_show_displays_boost_flags(self, mock_db):
+        from jobhaul.db.queries import upsert_listing
+        from jobhaul.models import Flags
+
+        listing_id = upsert_listing(
+            mock_db,
+            RawListing(
+                title="AI Engineer",
+                company="TechCo",
+                description="Work on AI",
+                source="platsbanken",
+                external_id="1",
+            ),
+        )
+        profile = Profile(name="Test", flags=Flags(boost=["AI"]))
+        with patch("jobhaul.cli.load_profile", return_value=profile):
+            result = runner.invoke(app, ["show", str(listing_id)])
+            assert result.exit_code == 0
+            assert "AI" in result.output
+
+
 class TestScanCommand:
     def test_scan_skip_analysis(self, mock_db, profile_file):
         with patch("jobhaul.cli.load_profile") as mock_load:
-            from jobhaul.models import Profile, SourceConfig
+            from jobhaul.models import SourceConfig
 
             mock_load.return_value = Profile(
                 name="Test",
