@@ -65,5 +65,13 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+
+    # Merge any existing duplicates that slipped through with old normalization
+    from jobhaul.db.queries import merge_existing_duplicates
+
+    merged = merge_existing_duplicates(conn)
+    if merged:
+        logger.info("Merged %d existing duplicate(s)", merged)
+
     logger.info("Database initialized at %s", db_path)
     return conn

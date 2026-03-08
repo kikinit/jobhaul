@@ -3,25 +3,78 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
+from jobhaul.log import get_logger
 from jobhaul.models import AnalysisResult, JobListing, RawListing
 
+logger = get_logger(__name__)
 
-def _normalize(text: str | None) -> str:
-    """Lowercase and strip whitespace for dedup matching."""
+
+def _normalize_for_dedup(text: str | None) -> str:
+    """Normalize text for dedup: strip all whitespace types, collapse spaces, lowercase."""
     if not text:
         return ""
-    return text.strip().lower()
+    # Replace all whitespace types (including \xa0 non-breaking space, tabs, newlines) with space
+    result = re.sub(r"[\s\u00a0\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]+", " ", text)
+    # Strip leading/trailing, lowercase
+    return result.strip().lower()
 
 
 def find_duplicate(conn: sqlite3.Connection, title: str, company: str | None) -> int | None:
     """Find an existing listing with the same normalized title+company."""
-    row = conn.execute(
-        "SELECT id FROM listings WHERE LOWER(TRIM(title)) = ? AND LOWER(TRIM(COALESCE(company, ''))) = ?",
-        (_normalize(title), _normalize(company)),
-    ).fetchone()
-    return row["id"] if row else None
+    norm_title = _normalize_for_dedup(title)
+    norm_company = _normalize_for_dedup(company)
+
+    # We need to normalize DB values in Python since SQLite can't handle all whitespace types
+    rows = conn.execute("SELECT id, title, company FROM listings").fetchall()
+    for row in rows:
+        if (_normalize_for_dedup(row["title"]) == norm_title
+                and _normalize_for_dedup(row["company"]) == norm_company):
+            return row["id"]
+    return None
+
+
+def merge_existing_duplicates(conn: sqlite3.Connection) -> int:
+    """Scan for existing duplicates and merge them. Returns number of merges performed."""
+    rows = conn.execute("SELECT id, title, company FROM listings ORDER BY id").fetchall()
+
+    # Group by normalized title+company
+    groups: dict[tuple[str, str], list[int]] = {}
+    for row in rows:
+        key = (_normalize_for_dedup(row["title"]), _normalize_for_dedup(row["company"]))
+        groups.setdefault(key, []).append(row["id"])
+
+    merge_count = 0
+    for key, ids in groups.items():
+        if len(ids) <= 1:
+            continue
+
+        # Keep the oldest (lowest id), merge the rest into it
+        keep_id = ids[0]
+        for dup_id in ids[1:]:
+            # Move listing_sources to the kept listing
+            conn.execute(
+                """UPDATE OR IGNORE listing_sources SET listing_id = ? WHERE listing_id = ?""",
+                (keep_id, dup_id),
+            )
+            # Delete any source entries that couldn't be moved (conflicts)
+            conn.execute("DELETE FROM listing_sources WHERE listing_id = ?", (dup_id,))
+            # Move analyses to the kept listing
+            conn.execute(
+                """UPDATE OR IGNORE analyses SET listing_id = ? WHERE listing_id = ?""",
+                (keep_id, dup_id),
+            )
+            conn.execute("DELETE FROM analyses WHERE listing_id = ?", (dup_id,))
+            # Delete the duplicate listing
+            conn.execute("DELETE FROM listings WHERE id = ?", (dup_id,))
+            merge_count += 1
+            logger.info("Merged duplicate listing %d into %d", dup_id, keep_id)
+
+    if merge_count:
+        conn.commit()
+    return merge_count
 
 
 def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
@@ -93,6 +146,7 @@ def list_listings(
     source: str | None = None,
     min_score: int | None = None,
     limit: int | None = None,
+    sort_by_score: bool = False,
 ) -> list[JobListing]:
     """List listings with optional filters."""
     query = """
@@ -111,7 +165,11 @@ def list_listings(
         query += " AND a.match_score >= ?"
         params.append(min_score)
 
-    query += " ORDER BY l.created_at DESC"
+    if sort_by_score:
+        # Sort by score descending; listings without analysis go to the bottom
+        query += " ORDER BY COALESCE(a.match_score, -1) DESC, l.created_at DESC"
+    else:
+        query += " ORDER BY l.created_at DESC"
 
     if limit:
         query += " LIMIT ?"
