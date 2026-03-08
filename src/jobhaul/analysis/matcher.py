@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from jobhaul.analysis.adapter import LLMAdapter
 from jobhaul.log import get_logger
@@ -11,15 +12,23 @@ from jobhaul.models import AnalysisResult, JobListing, Profile
 
 logger = get_logger(__name__)
 
+RETRY_PROMPT = (
+    "Your previous response was not valid JSON. "
+    "Please respond with ONLY a JSON object, nothing else."
+)
+
 
 def compute_profile_hash(profile: Profile) -> str:
     """Hash the profile to detect when re-analysis is needed."""
-    data = profile.model_dump_json(exclude={"sources", "llm"})
+    data = profile.model_dump_json(exclude={"sources", "llm", "scraping", "analysis"})
     return hashlib.sha256(data.encode()).hexdigest()[:16]
 
 
 def build_prompt(listing: JobListing, profile: Profile) -> str:
     """Build the LLM analysis prompt."""
+    flags = profile.get_effective_flags()
+    warn_text = ", ".join(flags.warn) if flags.warn else "none"
+
     return f"""Analyze this job listing against the candidate profile and return a JSON object.
 
 ## Job Listing
@@ -45,7 +54,7 @@ Description:
 - Education: {profile.education}
 - Languages: {', '.join(f'{l.language} ({l.level})' for l in profile.languages)}
 - Summary: {profile.summary}
-- Exclusions (industries to avoid): {', '.join(profile.exclusions)}
+- Industries to be cautious about: {warn_text}
 
 ## Instructions
 Return ONLY a JSON object with these fields:
@@ -71,6 +80,9 @@ def _to_list(value: str | list | None) -> list[str]:
 
 def parse_llm_response(response: str) -> dict:
     """Parse LLM JSON response, handling common formatting issues."""
+    if not response or not response.strip():
+        raise json.JSONDecodeError("Empty response", response or "", 0)
+
     text = response.strip()
 
     # Strip markdown code fences if present
@@ -81,7 +93,44 @@ def parse_llm_response(response: str) -> dict:
             lines = lines[:-1]
         text = "\n".join(lines)
 
-    return json.loads(text)
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON from mixed text by finding { ... } boundaries
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # Nothing worked
+    raise json.JSONDecodeError(
+        "No valid JSON found in response", text[:500], 0
+    )
+
+
+def pre_screen(listing: JobListing, profile: Profile) -> float:
+    """Simple keyword pre-screen: count profile terms that appear in the listing.
+
+    Returns a ratio from 0.0 (no matches) to 1.0 (all terms match).
+    """
+    terms = set()
+    for term in profile.skills + profile.roles + profile.search_terms:
+        terms.add(term.lower())
+
+    if not terms:
+        return 1.0  # No terms to match against — pass everything through
+
+    text = " ".join(
+        filter(None, [listing.title, listing.description])
+    ).lower()
+
+    matched = sum(1 for term in terms if term in text)
+    return matched / len(terms)
 
 
 async def analyze_listing(
@@ -96,12 +145,25 @@ async def analyze_listing(
 
     try:
         data = parse_llm_response(raw_response)
-    except json.JSONDecodeError as e:
-        logger.warning("Failed to parse LLM response for listing %d: %s", listing.id, e)
-        data = {
-            "match_score": 0,
-            "summary": f"Analysis failed: could not parse LLM response ({e})",
-        }
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(
+            "Failed to parse LLM response for listing %d: %s (response: %.500s)",
+            listing.id, e, raw_response,
+        )
+        # Retry once with a clearer prompt
+        logger.info("Retrying analysis for listing %d with explicit JSON request", listing.id)
+        retry_prompt = prompt + "\n\n" + RETRY_PROMPT
+        try:
+            raw_response = await adapter.analyze(retry_prompt)
+            data = parse_llm_response(raw_response)
+        except (json.JSONDecodeError, ValueError, Exception) as retry_e:
+            logger.warning(
+                "Retry also failed for listing %d: %s", listing.id, retry_e
+            )
+            data = {
+                "match_score": 0,
+                "summary": f"Analysis failed: could not parse LLM response ({e})",
+            }
 
     return AnalysisResult(
         listing_id=listing.id,
