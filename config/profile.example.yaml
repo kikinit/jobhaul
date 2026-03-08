@@ -1,0 +1,72 @@
+name: Mattias
+roles:
+  - web developer
+  - fullstack developer
+  - frontend developer
+  - backend developer
+
+search_terms:
+  - developer
+  - programmerare
+  - fullstack
+  - frontend
+  - backend
+  - TypeScript
+  - JavaScript
+  - webbutvecklare
+  - Node.js
+  - web developer
+
+skills:
+  - TypeScript
+  - JavaScript
+  - Node.js
+  - SvelteKit
+  - React
+  - SQLite
+  - REST APIs
+  - Git
+  - Python
+  - Docker
+
+learning:
+  - Rust
+  - AI/ML applications
+  - DevOps
+
+location: Stockholm
+remote_only: false
+will_relocate: false
+employment:
+  - full-time
+  - contract
+  - consulting
+seniority: junior-mid
+education: "Web developer program, Linnaeus University (graduating 2026)"
+languages:
+  - language: Swedish
+    level: native
+  - language: English
+    level: fluent
+summary: >
+  Junior/mid web developer finishing studies. Strong in TypeScript/JavaScript
+  full-stack with SvelteKit and React. Based in Stockholm, open to remote.
+  Has enskild firma for contract/consulting work.
+
+exclusions:
+  - gambling
+  - defense
+
+sources:
+  platsbanken:
+    enabled: true
+    region: CifL_Rzy_Mku
+  jooble:
+    enabled: false
+    api_key: ""
+  remoteok:
+    enabled: true
+
+llm:
+  adapter: claude-cli
+  model: claude-sonnet-4-20250514
