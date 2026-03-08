@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-scraping = ["playwright>=1.40"]
+scraping = ["playwright>=1.40", "playwright-stealth>=1.0"]
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
