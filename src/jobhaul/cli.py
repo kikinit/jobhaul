@@ -45,6 +45,16 @@ async def _scan(source: str | None, skip_analysis: bool, limit: int | None):
     import jobhaul.collectors.jooble  # noqa: F401
     import jobhaul.collectors.platsbanken  # noqa: F401
     import jobhaul.collectors.remoteok  # noqa: F401
+
+    try:
+        import jobhaul.collectors.linkedin  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        import jobhaul.collectors.indeed  # noqa: F401
+    except ImportError:
+        pass
+
     from jobhaul.collectors.registry import get_all_collectors, get_collector
     from jobhaul.db.queries import upsert_listing
 
@@ -272,6 +282,20 @@ def config_init():
     except FileExistsError as e:
         console.print(f"[yellow]{e}[/yellow]")
         raise typer.Exit(1)
+
+
+@app.command()
+def serve(
+    port: int = typer.Option(8080, help="Port to serve on"),
+    host: str = typer.Option("127.0.0.1", help="Host to bind to"),
+):
+    """Start the web dashboard."""
+    import uvicorn
+
+    from jobhaul.web.app import app as web_app
+
+    console.print(f"[bold]Starting Jobhaul web UI at http://{host}:{port}[/bold]")
+    uvicorn.run(web_app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
