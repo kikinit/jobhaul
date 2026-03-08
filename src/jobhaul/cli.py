@@ -176,13 +176,21 @@ def show(listing_id: int = typer.Argument(..., help="Listing ID to show")):
         if analysis.summary:
             console.print(f"Summary: {analysis.summary}")
         if analysis.match_reasons:
-            console.print(f"Match reasons: {analysis.match_reasons}")
+            console.print("Match reasons:")
+            for reason in analysis.match_reasons:
+                console.print(f"  - {reason}")
         if analysis.strengths:
-            console.print(f"Strengths: {analysis.strengths}")
+            console.print("Strengths:")
+            for strength in analysis.strengths:
+                console.print(f"  - {strength}")
         if analysis.missing_skills:
-            console.print(f"Missing skills: {analysis.missing_skills}")
+            console.print("Missing skills:")
+            for skill in analysis.missing_skills:
+                console.print(f"  - {skill}")
         if analysis.concerns:
-            console.print(f"Concerns: {analysis.concerns}")
+            console.print("Concerns:")
+            for concern in analysis.concerns:
+                console.print(f"  - {concern}")
         if analysis.application_notes:
             console.print(f"Application notes: {analysis.application_notes}")
     else:

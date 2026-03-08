@@ -117,10 +117,10 @@ class TestAnalyzeListing:
     async def test_successful_analysis(self, listing, profile):
         response_data = {
             "match_score": 85,
-            "match_reasons": "Strong Python skills",
-            "missing_skills": "Docker",
-            "strengths": "Location match",
-            "concerns": "Junior level",
+            "match_reasons": ["Strong Python skills", "Location match"],
+            "missing_skills": ["Docker"],
+            "strengths": ["Location match"],
+            "concerns": ["Junior level"],
             "summary": "Good fit overall",
             "application_notes": "Highlight Python projects",
         }
@@ -130,8 +130,25 @@ class TestAnalyzeListing:
 
         assert result.listing_id == 1
         assert result.match_score == 85
-        assert result.match_reasons == "Strong Python skills"
+        assert result.match_reasons == ["Strong Python skills", "Location match"]
         assert result.profile_hash == compute_profile_hash(profile)
+
+    @pytest.mark.asyncio
+    async def test_string_fields_coerced_to_lists(self, listing, profile):
+        response_data = {
+            "match_score": 70,
+            "match_reasons": "Single string reason",
+            "missing_skills": "Docker",
+            "strengths": "Good fit",
+            "concerns": "Junior",
+            "summary": "OK match",
+        }
+        adapter = MockAdapter(json.dumps(response_data))
+
+        result = await analyze_listing(listing, profile, adapter)
+
+        assert result.match_reasons == ["Single string reason"]
+        assert result.missing_skills == ["Docker"]
 
     @pytest.mark.asyncio
     async def test_invalid_llm_response(self, listing, profile):

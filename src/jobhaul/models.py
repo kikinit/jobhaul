@@ -73,10 +73,10 @@ class RawListing(BaseModel):
 class AnalysisResult(BaseModel):
     listing_id: int
     match_score: int = 0
-    match_reasons: str | None = None
-    missing_skills: str | None = None
-    strengths: str | None = None
-    concerns: str | None = None
+    match_reasons: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
     summary: str | None = None
     application_notes: str | None = None
     profile_hash: str = ""

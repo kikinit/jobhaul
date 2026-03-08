@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from jobhaul.models import AnalysisResult, JobListing, RawListing
@@ -143,6 +144,26 @@ def list_listings(
     return listings
 
 
+def _serialize_list(value: list[str]) -> str | None:
+    """Serialize a list to JSON string for DB storage."""
+    if not value:
+        return None
+    return json.dumps(value)
+
+
+def _deserialize_list(value: str | None) -> list[str]:
+    """Deserialize a JSON string from DB back to a list."""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return parsed
+        return [str(parsed)]
+    except (json.JSONDecodeError, TypeError):
+        return [value] if value else []
+
+
 def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
     """Save an analysis result (upsert on listing_id+profile_hash)."""
     cursor = conn.execute(
@@ -162,10 +183,10 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
         (
             result.listing_id,
             result.match_score,
-            result.match_reasons,
-            result.missing_skills,
-            result.strengths,
-            result.concerns,
+            _serialize_list(result.match_reasons),
+            _serialize_list(result.missing_skills),
+            _serialize_list(result.strengths),
+            _serialize_list(result.concerns),
             result.summary,
             result.application_notes,
             result.profile_hash,
@@ -186,10 +207,10 @@ def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | 
     return AnalysisResult(
         listing_id=row["listing_id"],
         match_score=row["match_score"],
-        match_reasons=row["match_reasons"],
-        missing_skills=row["missing_skills"],
-        strengths=row["strengths"],
-        concerns=row["concerns"],
+        match_reasons=_deserialize_list(row["match_reasons"]),
+        missing_skills=_deserialize_list(row["missing_skills"]),
+        strengths=_deserialize_list(row["strengths"]),
+        concerns=_deserialize_list(row["concerns"]),
         summary=row["summary"],
         application_notes=row["application_notes"],
         profile_hash=row["profile_hash"],

@@ -50,14 +50,23 @@ Description:
 ## Instructions
 Return ONLY a JSON object with these fields:
 - match_score: integer 0-100 (how well the candidate fits this role)
-- match_reasons: string (why the candidate is a good fit)
-- missing_skills: string (skills the job wants that the candidate lacks)
-- strengths: string (candidate's strongest selling points for this role)
-- concerns: string (potential issues or mismatches)
+- match_reasons: list of strings (reasons the candidate is a good fit)
+- missing_skills: list of strings (skills the job wants that the candidate lacks)
+- strengths: list of strings (candidate's strongest selling points for this role)
+- concerns: list of strings (potential issues or mismatches)
 - summary: string (1-2 sentence recommendation)
 - application_notes: string (tips for applying if the candidate should apply)
 
 Return ONLY valid JSON, no markdown formatting or extra text."""
+
+
+def _to_list(value: str | list | None) -> list[str]:
+    """Coerce a value from the LLM to a list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [value] if value else []
 
 
 def parse_llm_response(response: str) -> dict:
@@ -97,10 +106,10 @@ async def analyze_listing(
     return AnalysisResult(
         listing_id=listing.id,
         match_score=max(0, min(100, int(data.get("match_score", 0)))),
-        match_reasons=data.get("match_reasons"),
-        missing_skills=data.get("missing_skills"),
-        strengths=data.get("strengths"),
-        concerns=data.get("concerns"),
+        match_reasons=_to_list(data.get("match_reasons")),
+        missing_skills=_to_list(data.get("missing_skills")),
+        strengths=_to_list(data.get("strengths")),
+        concerns=_to_list(data.get("concerns")),
         summary=data.get("summary"),
         application_notes=data.get("application_notes"),
         profile_hash=profile_hash,

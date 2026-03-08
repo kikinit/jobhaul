@@ -155,10 +155,10 @@ class TestAnalysis:
         analysis = AnalysisResult(
             listing_id=listing_id,
             match_score=85,
-            match_reasons="Good fit",
-            missing_skills="Docker",
-            strengths="Python skills",
-            concerns="Junior",
+            match_reasons=["Good fit", "Skills match"],
+            missing_skills=["Docker"],
+            strengths=["Python skills"],
+            concerns=["Junior"],
             summary="Solid match",
             application_notes="Apply now",
             profile_hash="abc123",
@@ -168,7 +168,10 @@ class TestAnalysis:
         result = get_analysis(conn, listing_id)
         assert result is not None
         assert result.match_score == 85
-        assert result.match_reasons == "Good fit"
+        assert result.match_reasons == ["Good fit", "Skills match"]
+        assert result.missing_skills == ["Docker"]
+        assert result.strengths == ["Python skills"]
+        assert result.concerns == ["Junior"]
         assert result.profile_hash == "abc123"
 
     def test_upsert_analysis(self, conn, sample_listing):
