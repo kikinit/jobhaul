@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{{ listing.title }} — Jobhaul{% endblock %}
+{% block content %}
+<h1>{{ listing.title }}</h1>
+
+<div class="grid">
+    <div>
+        <p><strong>Company:</strong> {{ listing.company or "Unknown" }}</p>
+        <p><strong>Location:</strong> {{ listing.location or "Unknown" }}</p>
+        <p><strong>Remote:</strong> {{ "Yes" if listing.is_remote else "No" }}</p>
+        <p><strong>Employment:</strong> {{ listing.employment_type or "Unknown" }}</p>
+    </div>
+    <div>
+        <p><strong>Sources:</strong> {{ listing.sources | join(", ") }}</p>
+        <p><strong>Published:</strong> {{ listing.published_at or "Unknown" }}</p>
+        <p><strong>Added:</strong> {{ listing.created_at }}</p>
+        {% if listing.url %}
+        <p><a href="{{ listing.url }}" target="_blank" role="button" class="outline">View Original Posting</a></p>
+        {% endif %}
+    </div>
+</div>
+
+{% if source_urls %}
+<details>
+    <summary>Source URLs</summary>
+    <ul>
+    {% for url in source_urls %}
+        <li><a href="{{ url }}" target="_blank">{{ url }}</a></li>
+    {% endfor %}
+    </ul>
+</details>
+{% endif %}
+
+{% if analysis %}
+<article>
+    <header>
+        <h2>Analysis — Score: {{ analysis.match_score }}/100</h2>
+    </header>
+    {% if analysis.summary %}
+    <p><strong>Summary:</strong> {{ analysis.summary }}</p>
+    {% endif %}
+
+    {% if analysis.match_reasons %}
+    <h3>Match Reasons</h3>
+    <ul>
+    {% for reason in analysis.match_reasons %}
+        <li>{{ reason }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if analysis.strengths %}
+    <h3>Strengths</h3>
+    <ul>
+    {% for s in analysis.strengths %}
+        <li>{{ s }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if analysis.missing_skills %}
+    <h3>Missing Skills</h3>
+    <ul>
+    {% for s in analysis.missing_skills %}
+        <li>{{ s }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if analysis.concerns %}
+    <h3>Concerns</h3>
+    <ul>
+    {% for c in analysis.concerns %}
+        <li>{{ c }}</li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if analysis.application_notes %}
+    <p><strong>Application Notes:</strong> {{ analysis.application_notes }}</p>
+    {% endif %}
+
+    <footer>
+        <form method="post" action="/listings/{{ listing.id }}/reanalyze">
+            <button type="submit" class="outline">Re-analyze</button>
+        </form>
+    </footer>
+</article>
+{% else %}
+<article>
+    <p>No analysis yet.</p>
+    <form method="post" action="/listings/{{ listing.id }}/reanalyze">
+        <button type="submit">Analyze Now</button>
+    </form>
+</article>
+{% endif %}
+
+{% if listing.description %}
+<article>
+    <header><h2>Job Description</h2></header>
+    <div class="description-text">{{ listing.description }}</div>
+</article>
+{% endif %}
+{% endblock %}

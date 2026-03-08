@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Scan — Jobhaul{% endblock %}
+{% block content %}
+<h1>Scan for Jobs</h1>
+
+<form method="post" action="/scan">
+    <fieldset>
+        <legend>Select Sources</legend>
+        {% for source in available_sources %}
+        <label>
+            <input type="checkbox" name="sources" value="{{ source }}" checked>
+            {{ source }}
+        </label>
+        {% endfor %}
+    </fieldset>
+
+    <label>
+        <input type="checkbox" name="analyze">
+        Run LLM analysis after scan
+    </label>
+
+    <button type="submit">Start Scan</button>
+</form>
+
+{% if results %}
+<article>
+    <header><h2>Scan Results</h2></header>
+    <p><strong>Total collected:</strong> {{ results.total }} listings</p>
+
+    <table>
+        <thead><tr><th>Source</th><th>Listings</th><th>Errors</th></tr></thead>
+        <tbody>
+        {% for r in results.scan %}
+            <tr>
+                <td>{{ r.source }}</td>
+                <td>{{ r.count }}</td>
+                <td>
+                    {% if r.errors %}
+                    <ul>{% for e in r.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {% if results.analysis %}
+    <h3>Analysis Results</h3>
+    <table>
+        <thead><tr><th>Title</th><th>Score</th></tr></thead>
+        <tbody>
+        {% for a in results.analysis %}
+            <tr>
+                <td>{{ a.title }}</td>
+                <td>{{ a.score ~ "/100" if a.score is not none else "Error" }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+{% endif %}
+{% endblock %}

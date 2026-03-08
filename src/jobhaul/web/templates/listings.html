@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Listings — Jobhaul{% endblock %}
+{% block content %}
+<h1>Listings ({{ total }})</h1>
+
+<form method="get" action="/listings">
+    <div class="grid">
+        <label>
+            Source
+            <input type="text" name="source" value="{{ source }}" placeholder="e.g. platsbanken">
+        </label>
+        <label>
+            Min Score
+            <input type="number" name="min_score" value="{{ min_score or '' }}" min="0" max="100" placeholder="0-100">
+        </label>
+        <label>
+            Days
+            <input type="number" name="days" value="{{ days }}" min="1" max="365">
+        </label>
+        <label>
+            Sort by
+            <select name="sort">
+                <option value="date" {% if sort == "date" %}selected{% endif %}>Date</option>
+                <option value="score" {% if sort == "score" %}selected{% endif %}>Score</option>
+                <option value="company" {% if sort == "company" %}selected{% endif %}>Company</option>
+            </select>
+        </label>
+    </div>
+    <div class="grid">
+        <label>
+            <input type="checkbox" name="remote_only" {% if remote_only %}checked{% endif %}>
+            Remote only
+        </label>
+        <button type="submit">Filter</button>
+    </div>
+</form>
+
+{% if listings %}
+<table>
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Company</th>
+            <th>Location</th>
+            <th>Remote</th>
+            <th>Sources</th>
+            <th>Score</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for item in listings %}
+        <tr>
+            <td><a href="/listings/{{ item.listing.id }}">{{ item.listing.title[:60] }}</a></td>
+            <td>{{ item.listing.company or "?" }}</td>
+            <td>{{ item.listing.location or "?" }}</td>
+            <td>{{ "Yes" if item.listing.is_remote else "No" }}</td>
+            <td>{{ item.listing.sources | join(", ") }}</td>
+            <td>{{ item.analysis.match_score ~ "/100" if item.analysis else "—" }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if total_pages > 1 %}
+<nav>
+    <ul>
+        {% if page > 1 %}
+        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&page={{ page - 1 }}">Previous</a></li>
+        {% endif %}
+        <li>Page {{ page }} of {{ total_pages }}</li>
+        {% if page < total_pages %}
+        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&page={{ page + 1 }}">Next</a></li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+{% else %}
+<p>No listings match the current filters.</p>
+{% endif %}
+{% endblock %}

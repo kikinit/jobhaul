@@ -1,0 +1,12 @@
+.stat-number {
+    font-size: 2rem;
+    font-weight: bold;
+    text-align: center;
+}
+
+.description-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 600px;
+    overflow-y: auto;
+}

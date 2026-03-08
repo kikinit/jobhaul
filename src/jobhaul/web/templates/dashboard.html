@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Jobhaul{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="grid">
+    <article>
+        <header>Total Listings</header>
+        <p class="stat-number">{{ stats.total_listings }}</p>
+    </article>
+    <article>
+        <header>Analyzed</header>
+        <p class="stat-number">{{ stats.total_analyses }}</p>
+    </article>
+    <article>
+        <header>Avg Score</header>
+        <p class="stat-number">{{ stats.avg_score }}</p>
+    </article>
+    <article>
+        <header>Dedup Savings</header>
+        <p class="stat-number">{{ stats.dedup_savings }}</p>
+    </article>
+</div>
+
+{% if stats.source_counts %}
+<details>
+    <summary>Listings by source</summary>
+    <table>
+        <thead><tr><th>Source</th><th>Count</th></tr></thead>
+        <tbody>
+        {% for src, count in stats.source_counts.items() %}
+            <tr><td>{{ src }}</td><td>{{ count }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</details>
+{% endif %}
+
+<h2>Top Matches</h2>
+{% if top_matches %}
+<table>
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Company</th>
+            <th>Score</th>
+            <th>Sources</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for item in top_matches %}
+        <tr>
+            <td><a href="/listings/{{ item.listing.id }}">{{ item.listing.title[:60] }}</a></td>
+            <td>{{ item.listing.company or "?" }}</td>
+            <td>{{ item.analysis.match_score }}/100</td>
+            <td>{{ item.listing.sources | join(", ") }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No analyzed listings yet. <a href="/scan">Run a scan</a> to get started.</p>
+{% endif %}
+{% endblock %}
