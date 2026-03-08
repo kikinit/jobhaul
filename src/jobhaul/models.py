@@ -35,7 +35,7 @@ class ScrapingConfig(BaseModel):
 
 
 class AnalysisConfig(BaseModel):
-    pre_screen_threshold: float = 0.1
+    pre_screen_threshold: float = 0.15
 
 
 class Profile(BaseModel):

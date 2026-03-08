@@ -37,14 +37,15 @@ async def dashboard(request: Request):
     conn = _get_db()
     try:
         stats = get_stats(conn)
-        top_listings = list_listings(conn, days=30, limit=10)
+        # Get analyzed listings sorted by score (not just recent 10)
+        all_analyzed = list_listings(conn, days=30, min_score=1, sort_by_score=True, limit=100)
         top_matches = []
-        for listing in top_listings:
+        for listing in all_analyzed:
             analysis = get_analysis(conn, listing.id)
             if analysis and analysis.match_score > 0:
                 top_matches.append({"listing": listing, "analysis": analysis})
-        top_matches.sort(key=lambda x: x["analysis"].match_score, reverse=True)
-        top_matches = top_matches[:10]
+            if len(top_matches) >= 10:
+                break
     finally:
         conn.close()
 
@@ -55,21 +56,35 @@ async def dashboard(request: Request):
     })
 
 
+def _parse_optional_int(value: str | None) -> int | None:
+    """Parse optional int query param, treating empty string as None."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
 @app.get("/listings", response_class=HTMLResponse)
 async def listings_page(
     request: Request,
     source: str | None = Query(None),
-    min_score: int | None = Query(None),
+    min_score: str | None = Query(None),
     remote_only: bool = Query(False),
-    days: int = Query(30),
+    days: str | None = Query("30"),
     sort: str = Query("date"),
     page: int = Query(1, ge=1),
 ):
+    parsed_min_score = _parse_optional_int(min_score)
+    parsed_days = _parse_optional_int(days) or 30
+
     per_page = 50
     conn = _get_db()
     try:
         all_listings = list_listings(
-            conn, days=days, source=source, min_score=min_score,
+            conn, days=parsed_days, source=source, min_score=parsed_min_score,
+            sort_by_score=(sort == "score"),
         )
 
         listings_with_analysis = []
@@ -104,9 +119,9 @@ async def listings_page(
         "total_pages": total_pages,
         "total": total,
         "source": source or "",
-        "min_score": min_score,
+        "min_score": parsed_min_score,
         "remote_only": remote_only,
-        "days": days,
+        "days": parsed_days,
         "sort": sort,
     })
 
@@ -287,21 +302,25 @@ def _listing_to_dict(listing, analysis=None):
 @app.get("/api/listings")
 async def api_listings(
     source: str | None = Query(None),
-    min_score: int | None = Query(None),
+    min_score: str | None = Query(None),
     remote_only: bool = Query(False),
-    days: int = Query(30),
-    limit: int | None = Query(None),
+    days: str | None = Query("30"),
+    limit: str | None = Query(None),
 ):
+    parsed_min_score = _parse_optional_int(min_score)
+    parsed_days = _parse_optional_int(days) or 30
+    parsed_limit = _parse_optional_int(limit)
+
     conn = _get_db()
     try:
-        all_listings = list_listings(conn, days=days, source=source, min_score=min_score)
+        all_listings = list_listings(conn, days=parsed_days, source=source, min_score=parsed_min_score)
         results = []
         for listing in all_listings:
             if remote_only and not listing.is_remote:
                 continue
             analysis = get_analysis(conn, listing.id)
             results.append(_listing_to_dict(listing, analysis))
-            if limit and len(results) >= limit:
+            if parsed_limit and len(results) >= parsed_limit:
                 break
     finally:
         conn.close()

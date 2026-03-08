@@ -26,10 +26,7 @@ def compute_profile_hash(profile: Profile) -> str:
 
 def build_prompt(listing: JobListing, profile: Profile) -> str:
     """Build the LLM analysis prompt."""
-    flags = profile.get_effective_flags()
-    warn_text = ", ".join(flags.warn) if flags.warn else "none"
-
-    return f"""Analyze this job listing against the candidate profile and return a JSON object.
+    return f"""Analyze this job listing against the candidate profile. Return a JSON object.
 
 ## Job Listing
 - Title: {listing.title}
@@ -43,6 +40,7 @@ Description:
 
 ## Candidate Profile
 - Name: {profile.name}
+- Seniority: {profile.seniority}
 - Roles sought: {', '.join(profile.roles)}
 - Skills: {', '.join(profile.skills)}
 - Currently learning: {', '.join(profile.learning)}
@@ -50,21 +48,46 @@ Description:
 - Remote only: {profile.remote_only}
 - Will relocate: {profile.will_relocate}
 - Employment preferences: {', '.join(profile.employment)}
-- Seniority: {profile.seniority}
 - Education: {profile.education}
 - Languages: {', '.join(f'{l.language} ({l.level})' for l in profile.languages)}
 - Summary: {profile.summary}
-- Industries to be cautious about: {warn_text}
 
-## Instructions
+## CRITICAL: Skill depth context
+ALL candidate skills are at FOUNDATIONAL/ACADEMIC level from university coursework and side projects. The candidate has LESS THAN 1 YEAR of professional experience. Do NOT equate "knows TypeScript" with "5 years production TypeScript". Treat all listed skills as beginner-to-intermediate.
+
+## CRITICAL: Scoring rules (follow strictly)
+
+### Dealbreakers — these CAP the score:
+1. **Senior/Lead/Staff/Principal roles → MAX SCORE 10.** The candidate is junior and will not become senior in the next few years. This is effectively an exclusion regardless of tech match.
+2. **Roles requiring 3+ years experience → MAX SCORE 25.** The candidate has <1 year.
+3. **Roles requiring 5+ years experience → MAX SCORE 10.**
+4. **Primary tech the candidate does not know** (e.g., the role is primarily PHP, Go, C#, .NET, Swift, Kotlin/Android, Embedded C, SAP, Salesforce, Dynamics 365) **→ MAX SCORE 20.** Secondary/nice-to-have tech is less important — tech can be learned.
+
+### Boosters:
+- **Explicitly junior/graduate/entry-level roles → BOOST +15-25 points.** This is the candidate's target segment.
+- **Tech stack closely matches candidate's skills → positive signal** (but remember: foundational level).
+
+### Neutral factors (do NOT penalize):
+- Employment type (consulting, staffing, contract, permanent) — all are acceptable.
+- Industry warnings — do not reduce score for defense/gambling/staffing. These are shown as labels only.
+
+### Scoring guide:
+- 80-100: Strong match — junior/graduate role, good tech overlap, realistic to get hired
+- 60-79: Good match — entry-level friendly or role where junior is acceptable
+- 40-59: Stretch but possible — mid-level expected, or partial tech mismatch
+- 20-39: Unlikely — significant experience gap or wrong primary tech
+- 5-15: Senior/Lead role or completely wrong domain
+- 0-4: Entirely irrelevant
+
+## Output format
 Return ONLY a JSON object with these fields:
-- match_score: integer 0-100 (how well the candidate fits this role)
-- match_reasons: list of strings (reasons the candidate is a good fit)
+- match_score: integer 0-100 (realistic chance of getting this job)
+- match_reasons: list of strings (why the candidate fits)
 - missing_skills: list of strings (skills the job wants that the candidate lacks)
-- strengths: list of strings (candidate's strongest selling points for this role)
+- strengths: list of strings (candidate's selling points for this role)
 - concerns: list of strings (potential issues or mismatches)
 - summary: string (1-2 sentence recommendation)
-- application_notes: string (tips for applying if the candidate should apply)
+- application_notes: string (tips for applying, or empty if not worth applying)
 
 Return ONLY valid JSON, no markdown formatting or extra text."""
 
