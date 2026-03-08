@@ -31,58 +31,82 @@ def _get_db():
 def scan(
     source: Optional[str] = typer.Option(None, help="Single source to collect from"),
     skip_analysis: bool = typer.Option(False, "--skip-analysis", help="Collect only, no analysis"),
+    analyze_only: bool = typer.Option(
+        False, "--analyze-only", help="Skip collection, only analyze unanalyzed listings"
+    ),
     limit: Optional[int] = typer.Option(None, help="Max number of listings to analyze"),
 ):
     """Collect job listings and optionally analyze them."""
-    asyncio.run(_scan(source, skip_analysis, limit))
+    asyncio.run(_scan(source, skip_analysis, analyze_only, limit))
 
 
-async def _scan(source: str | None, skip_analysis: bool, limit: int | None):
+async def _scan(
+    source: str | None, skip_analysis: bool, analyze_only: bool, limit: int | None
+):
     profile = load_profile()
     conn = _get_db()
+    flags = profile.get_effective_flags()
 
-    # Import collectors to trigger registration
-    import jobhaul.collectors.jooble  # noqa: F401
-    import jobhaul.collectors.platsbanken  # noqa: F401
-    import jobhaul.collectors.remoteok  # noqa: F401
+    if not analyze_only:
+        # Import collectors to trigger registration
+        import jobhaul.collectors.jooble  # noqa: F401
+        import jobhaul.collectors.platsbanken  # noqa: F401
+        import jobhaul.collectors.remoteok  # noqa: F401
 
-    try:
-        import jobhaul.collectors.linkedin  # noqa: F401
-    except ImportError:
-        pass
-    try:
-        import jobhaul.collectors.indeed  # noqa: F401
-    except ImportError:
-        pass
+        try:
+            import jobhaul.collectors.linkedin  # noqa: F401
+        except ImportError:
+            pass
+        try:
+            import jobhaul.collectors.indeed  # noqa: F401
+        except ImportError:
+            pass
 
-    from jobhaul.collectors.registry import get_all_collectors, get_collector
-    from jobhaul.db.queries import upsert_listing
+        from jobhaul.collectors.registry import get_all_collectors, get_collector
+        from jobhaul.db.queries import upsert_listing
+        from jobhaul.flagging import flag_listing
+        from jobhaul.models import JobListing
 
-    if source:
-        collectors = [get_collector(source)]
-    else:
-        collectors = get_all_collectors()
+        if source:
+            collectors = [get_collector(source)]
+        else:
+            collectors = get_all_collectors()
 
-    total_collected = 0
-    for collector in collectors:
-        console.print(f"[bold]Collecting from {collector.name}...[/bold]")
-        result = await collector.collect(profile)
-        for raw in result.listings:
-            upsert_listing(conn, raw)
-        total_collected += len(result.listings)
+        total_collected = 0
+        skipped_excluded = 0
+        for collector in collectors:
+            console.print(f"[bold]Collecting from {collector.name}...[/bold]")
+            result = await collector.collect(profile)
+            for raw in result.listings:
+                # Check exclusion before inserting
+                temp_listing = JobListing(
+                    title=raw.title,
+                    company=raw.company,
+                    description=raw.description,
+                )
+                flag_result = flag_listing(temp_listing, flags)
+                if flag_result["excluded"]:
+                    logger.info("Excluded listing: %s (matched exclude filter)", raw.title)
+                    skipped_excluded += 1
+                    continue
+                upsert_listing(conn, raw)
+            total_collected += len(result.listings) - skipped_excluded
 
-        if result.errors:
-            for err in result.errors:
-                console.print(f"  [yellow]Warning: {err}[/yellow]")
+            if result.errors:
+                for err in result.errors:
+                    console.print(f"  [yellow]Warning: {err}[/yellow]")
 
-        console.print(f"  Collected {len(result.listings)} listings")
+            console.print(f"  Collected {len(result.listings)} listings")
 
-    console.print(f"\n[green]Total: {total_collected} listings collected[/green]")
+        console.print(f"\n[green]Total: {total_collected} listings collected[/green]")
+        if skipped_excluded:
+            console.print(f"[dim]Skipped {skipped_excluded} excluded listings[/dim]")
 
     if not skip_analysis:
         from jobhaul.analysis.claude_cli import ClaudeCliAdapter
-        from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash
+        from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash, pre_screen
         from jobhaul.db.queries import get_unanalyzed_listings, save_analysis
+        from jobhaul.flagging import flag_listing
 
         profile_hash = compute_profile_hash(profile)
         adapter = ClaudeCliAdapter(model=profile.llm.model)
@@ -90,17 +114,43 @@ async def _scan(source: str | None, skip_analysis: bool, limit: int | None):
 
         if not unanalyzed:
             console.print("[dim]No new listings to analyze.[/dim]")
+            conn.close()
             return
 
         console.print(f"\n[bold]Analyzing {len(unanalyzed)} listings...[/bold]")
+        threshold = profile.analysis.pre_screen_threshold
         for listing in unanalyzed:
+            # Check exclusion
+            flag_result = flag_listing(listing, flags)
+            if flag_result["excluded"]:
+                console.print(
+                    f"  [dim]Skipping '{listing.title}' (excluded by flag filter)[/dim]"
+                )
+                continue
+
+            # Pre-screen
+            score = pre_screen(listing, profile)
+            if score < threshold:
+                console.print(
+                    f"  [dim]Skipping '{listing.title}' (pre-screen: {score:.2f})[/dim]"
+                )
+                continue
+
             try:
                 result = await analyze_listing(listing, profile, adapter)
                 save_analysis(conn, result)
                 emoji = "+" if result.match_score >= 50 else "-"
+
+                # Show flags
+                flag_info = ""
+                if flag_result["boost"]:
+                    flag_info += " \u2705 " + ", ".join(flag_result["boost"])
+                if flag_result["warn"]:
+                    flag_info += " \u26a0\ufe0f " + ", ".join(flag_result["warn"])
+
                 console.print(
                     f"  [{emoji}] {listing.title} @ {listing.company or '?'}: "
-                    f"score {result.match_score}"
+                    f"score {result.match_score}{flag_info}"
                 )
             except Exception as e:
                 console.print(f"  [red]Error analyzing {listing.title}: {e}[/red]")
@@ -118,14 +168,27 @@ def list_listings(
     """List recent job listings."""
     from jobhaul.db.queries import get_analysis
     from jobhaul.db.queries import list_listings as db_list
+    from jobhaul.flagging import flag_listing
 
+    profile = load_profile()
+    flags = profile.get_effective_flags()
+
+    sort_by_score = top is not None or min_score is not None
     conn = _get_db()
-    listings = db_list(conn, days=days, source=source, min_score=min_score, limit=top)
+    listings = db_list(
+        conn, days=days, source=source, min_score=min_score,
+        limit=top if not sort_by_score else None,
+        sort_by_score=sort_by_score,
+    )
 
     if not listings:
         console.print("[dim]No listings found.[/dim]")
         conn.close()
         return
+
+    # Apply limit after score sorting if needed
+    if sort_by_score and top:
+        listings = listings[:top]
 
     table = Table(title="Job Listings")
     table.add_column("ID", style="cyan", width=5)
@@ -135,10 +198,21 @@ def list_listings(
     table.add_column("Remote")
     table.add_column("Sources")
     table.add_column("Score", justify="right")
+    table.add_column("Flags")
 
     for listing in listings:
         analysis = get_analysis(conn, listing.id)
         score = str(analysis.match_score) if analysis else "-"
+
+        # Flag display
+        flag_result = flag_listing(listing, flags)
+        flag_parts = []
+        if flag_result["boost"]:
+            flag_parts.append("\u2705 " + ",".join(flag_result["boost"]))
+        if flag_result["warn"]:
+            flag_parts.append("\u26a0\ufe0f " + ",".join(flag_result["warn"]))
+        flag_str = " ".join(flag_parts)
+
         table.add_row(
             str(listing.id),
             listing.title[:50],
@@ -147,6 +221,7 @@ def list_listings(
             "Yes" if listing.is_remote else "No",
             ", ".join(listing.sources),
             score,
+            flag_str,
         )
 
     console.print(table)
@@ -157,6 +232,10 @@ def list_listings(
 def show(listing_id: int = typer.Argument(..., help="Listing ID to show")):
     """Show full detail for a listing including analysis."""
     from jobhaul.db.queries import get_analysis, get_listing
+    from jobhaul.flagging import flag_listing
+
+    profile = load_profile()
+    flags = profile.get_effective_flags()
 
     conn = _get_db()
     listing = get_listing(conn, listing_id)
@@ -173,6 +252,13 @@ def show(listing_id: int = typer.Argument(..., help="Listing ID to show")):
     console.print(f"Employment: {listing.employment_type or '?'}")
     console.print(f"Sources: {', '.join(listing.sources)}")
     console.print(f"Published: {listing.published_at or '?'}")
+
+    # Show flags
+    flag_result = flag_listing(listing, flags)
+    if flag_result["boost"]:
+        console.print(f"\u2705 Boost: {', '.join(flag_result['boost'])}")
+    if flag_result["warn"]:
+        console.print(f"\u26a0\ufe0f Warn: {', '.join(flag_result['warn'])}")
 
     if listing.url:
         console.print(f"URL: {listing.url}")
@@ -210,34 +296,64 @@ def show(listing_id: int = typer.Argument(..., help="Listing ID to show")):
 
 
 @app.command()
-def analyze(listing_id: int = typer.Argument(..., help="Listing ID to analyze")):
-    """(Re-)analyze a single listing."""
-    asyncio.run(_analyze(listing_id))
+def analyze(
+    listing_id: int = typer.Argument(0, help="Listing ID to analyze"),
+    all_: bool = typer.Option(False, "--all", help="Analyze all unanalyzed listings"),
+    limit: Optional[int] = typer.Option(None, help="Max listings to analyze (with --all)"),
+):
+    """(Re-)analyze a single listing, or all unanalyzed listings with --all."""
+    asyncio.run(_analyze(listing_id, all_, limit))
 
 
-async def _analyze(listing_id: int):
+async def _analyze(listing_id: int, all_: bool, limit: int | None):
     from jobhaul.analysis.claude_cli import ClaudeCliAdapter
     from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash
-    from jobhaul.db.queries import get_listing, save_analysis
+    from jobhaul.db.queries import get_listing, get_unanalyzed_listings, save_analysis
 
     profile = load_profile()
     conn = _get_db()
-
-    listing = get_listing(conn, listing_id)
-    if not listing:
-        console.print(f"[red]Listing {listing_id} not found.[/red]")
-        raise typer.Exit(1)
-
     adapter = ClaudeCliAdapter(model=profile.llm.model)
-    console.print(f"[bold]Analyzing: {listing.title}...[/bold]")
+    profile_hash = compute_profile_hash(profile)
 
-    result = await analyze_listing(listing, profile, adapter)
-    result.profile_hash = compute_profile_hash(profile)
-    save_analysis(conn, result)
+    if all_:
+        unanalyzed = get_unanalyzed_listings(conn, profile_hash, limit=limit)
+        if not unanalyzed:
+            console.print("[dim]No unanalyzed listings.[/dim]")
+            conn.close()
+            return
 
-    console.print(f"[green]Score: {result.match_score}/100[/green]")
-    if result.summary:
-        console.print(f"Summary: {result.summary}")
+        console.print(f"[bold]Analyzing {len(unanalyzed)} listings...[/bold]")
+        for listing in unanalyzed:
+            try:
+                result = await analyze_listing(listing, profile, adapter)
+                result.profile_hash = profile_hash
+                save_analysis(conn, result)
+                console.print(
+                    f"  {listing.title} @ {listing.company or '?'}: "
+                    f"score {result.match_score}"
+                )
+            except Exception as e:
+                console.print(f"  [red]Error analyzing {listing.title}: {e}[/red]")
+    else:
+        if listing_id == 0:
+            console.print("[red]Provide a listing ID or use --all.[/red]")
+            conn.close()
+            raise typer.Exit(1)
+
+        listing = get_listing(conn, listing_id)
+        if not listing:
+            console.print(f"[red]Listing {listing_id} not found.[/red]")
+            conn.close()
+            raise typer.Exit(1)
+
+        console.print(f"[bold]Analyzing: {listing.title}...[/bold]")
+        result = await analyze_listing(listing, profile, adapter)
+        result.profile_hash = profile_hash
+        save_analysis(conn, result)
+
+        console.print(f"[green]Score: {result.match_score}/100[/green]")
+        if result.summary:
+            console.print(f"Summary: {result.summary}")
 
     conn.close()
 
