@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
 import sqlite3
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -270,3 +269,145 @@ async def run_scan(request: Request):
             "analysis": analysis_results if run_analysis else None,
         },
     })
+
+
+# --- JSON API ---
+
+
+def _listing_to_dict(listing, analysis=None):
+    """Convert a listing and optional analysis to a JSON-safe dict."""
+    data = listing.model_dump()
+    if analysis:
+        data["analysis"] = analysis.model_dump()
+    else:
+        data["analysis"] = None
+    return data
+
+
+@app.get("/api/listings")
+async def api_listings(
+    source: str | None = Query(None),
+    min_score: int | None = Query(None),
+    remote_only: bool = Query(False),
+    days: int = Query(30),
+    limit: int | None = Query(None),
+):
+    conn = _get_db()
+    try:
+        all_listings = list_listings(conn, days=days, source=source, min_score=min_score)
+        results = []
+        for listing in all_listings:
+            if remote_only and not listing.is_remote:
+                continue
+            analysis = get_analysis(conn, listing.id)
+            results.append(_listing_to_dict(listing, analysis))
+            if limit and len(results) >= limit:
+                break
+    finally:
+        conn.close()
+    return results
+
+
+@app.get("/api/listings/{listing_id}")
+async def api_listing_detail(listing_id: int):
+    conn = _get_db()
+    try:
+        listing = get_listing(conn, listing_id)
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        analysis = get_analysis(conn, listing.id)
+    finally:
+        conn.close()
+    return _listing_to_dict(listing, analysis)
+
+
+@app.get("/api/stats")
+async def api_stats():
+    conn = _get_db()
+    try:
+        stats = get_stats(conn)
+    finally:
+        conn.close()
+    return stats
+
+
+@app.post("/api/scan")
+async def api_scan(
+    request: Request,
+):
+    from jobhaul.collectors.registry import get_all_collectors, get_collector
+    from jobhaul.config import load_profile
+    from jobhaul.db.queries import upsert_listing
+
+    # Import collectors to trigger registration
+    import jobhaul.collectors.jooble  # noqa: F401
+    import jobhaul.collectors.platsbanken  # noqa: F401
+    import jobhaul.collectors.remoteok  # noqa: F401
+
+    try:
+        import jobhaul.collectors.linkedin  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        import jobhaul.collectors.indeed  # noqa: F401
+    except ImportError:
+        pass
+
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    selected_sources = body.get("sources", [])
+    run_analysis = body.get("analyze", False)
+
+    profile = load_profile()
+    conn = _get_db()
+    scan_results = []
+
+    try:
+        if selected_sources:
+            collectors = [get_collector(s) for s in selected_sources]
+        else:
+            collectors = get_all_collectors()
+
+        total_collected = 0
+        for collector in collectors:
+            result = await collector.collect(profile)
+            for raw in result.listings:
+                upsert_listing(conn, raw)
+            total_collected += len(result.listings)
+            scan_results.append({
+                "source": collector.name,
+                "count": len(result.listings),
+                "errors": result.errors,
+            })
+
+        analysis_results = []
+        if run_analysis:
+            from jobhaul.analysis.claude_cli import ClaudeCliAdapter
+            from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash
+            from jobhaul.db.queries import get_unanalyzed_listings
+
+            profile_hash = compute_profile_hash(profile)
+            adapter = ClaudeCliAdapter(model=profile.llm.model)
+            unanalyzed = get_unanalyzed_listings(conn, profile_hash, limit=20)
+
+            for listing in unanalyzed:
+                try:
+                    result = await analyze_listing(listing, profile, adapter)
+                    save_analysis(conn, result)
+                    analysis_results.append({
+                        "title": listing.title,
+                        "score": result.match_score,
+                    })
+                except Exception as e:
+                    analysis_results.append({
+                        "title": listing.title,
+                        "score": None,
+                        "error": str(e),
+                    })
+    finally:
+        conn.close()
+
+    return {
+        "total_collected": total_collected,
+        "sources": scan_results,
+        "analysis": analysis_results if run_analysis else None,
+    }
