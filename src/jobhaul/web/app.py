@@ -38,14 +38,12 @@ async def dashboard(request: Request):
     try:
         stats = get_stats(conn)
         # Get analyzed listings sorted by score (not just recent 10)
-        all_analyzed = list_listings(conn, days=30, min_score=1, sort_by_score=True, limit=100)
+        all_analyzed = list_listings(conn, days=30, min_score=1, sort_by_score=True, limit=10)
         top_matches = []
         for listing in all_analyzed:
             analysis = get_analysis(conn, listing.id)
-            if analysis and analysis.match_score > 0:
+            if analysis:
                 top_matches.append({"listing": listing, "analysis": analysis})
-            if len(top_matches) >= 10:
-                break
     finally:
         conn.close()
 
@@ -58,10 +56,13 @@ async def dashboard(request: Request):
 
 def _parse_optional_int(value: str | None) -> int | None:
     """Parse optional int query param, treating empty string as None."""
-    if value is None or value == "":
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
         return None
     try:
-        return int(value)
+        return int(float(value))
     except (ValueError, TypeError):
         return None
 

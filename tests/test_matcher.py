@@ -106,6 +106,49 @@ class TestBuildPrompt:
         assert "JSON" in prompt
         assert "match_score" in prompt
 
+    def test_prompt_contains_dealbreaker_senior_cap(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "Senior/Lead/Staff/Principal" in prompt
+        assert "MAX SCORE 10" in prompt
+
+    def test_prompt_contains_dealbreaker_3yr_cap(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "3+ years" in prompt
+        assert "MAX SCORE 25" in prompt
+
+    def test_prompt_contains_dealbreaker_5yr_cap(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "5+ years" in prompt
+
+    def test_prompt_contains_dealbreaker_wrong_tech(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "Primary tech the candidate does not know" in prompt
+        assert "MAX SCORE 20" in prompt
+
+    def test_prompt_contains_junior_boost(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "junior/graduate/entry-level" in prompt
+        assert "BOOST" in prompt
+
+    def test_prompt_contains_skill_depth_context(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "FOUNDATIONAL/ACADEMIC" in prompt
+        assert "LESS THAN 1 YEAR" in prompt
+
+    def test_prompt_contains_neutral_factors(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "Employment type" in prompt or "employment type" in prompt
+        assert "do NOT penalize" in prompt or "do not reduce score" in prompt
+
+    def test_prompt_contains_scoring_ranges(self, listing, profile):
+        prompt = build_prompt(listing, profile)
+        assert "80-100" in prompt
+        assert "60-79" in prompt
+        assert "40-59" in prompt
+        assert "20-39" in prompt
+        assert "5-15" in prompt
+        assert "0-4" in prompt
+
 
 class TestParseLLMResponse:
     def test_parse_plain_json(self):

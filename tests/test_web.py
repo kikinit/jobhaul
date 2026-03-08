@@ -228,3 +228,164 @@ class TestAPIStats:
         assert data["total_listings"] == 2
         assert data["total_analyses"] == 1
         assert data["avg_score"] == 85.0
+
+
+# --- _parse_optional_int Tests ---
+
+
+class TestParseOptionalInt:
+    def test_none_returns_none(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int(None) is None
+
+    def test_empty_string_returns_none(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("") is None
+
+    def test_whitespace_returns_none(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("   ") is None
+
+    def test_valid_int(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("42") == 42
+
+    def test_negative_int(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("-5") == -5
+
+    def test_zero(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("0") == 0
+
+    def test_float_truncation(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("3.7") == 3
+
+    def test_float_truncation_negative(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("-2.9") == -2
+
+    def test_whitespace_padded(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("  10  ") == 10
+
+    def test_non_numeric_returns_none(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("abc") is None
+
+    def test_very_large_number(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("999999999") == 999999999
+
+    def test_mixed_text_returns_none(self):
+        from jobhaul.web.app import _parse_optional_int
+        assert _parse_optional_int("12abc") is None
+
+
+# --- Filter Edge Cases (HTTP) ---
+
+
+class TestFilterEdgeCasesHTTP:
+    def test_empty_min_score(self, client, seeded_db):
+        resp = client.get("/listings?min_score=")
+        assert resp.status_code == 200
+
+    def test_empty_days(self, client, seeded_db):
+        resp = client.get("/listings?days=")
+        assert resp.status_code == 200
+
+    def test_empty_all_filters(self, client, seeded_db):
+        resp = client.get("/listings?min_score=&days=&source=&sort=date")
+        assert resp.status_code == 200
+
+    def test_non_numeric_min_score(self, client, seeded_db):
+        resp = client.get("/listings?min_score=abc")
+        assert resp.status_code == 200
+
+    def test_non_numeric_days(self, client, seeded_db):
+        resp = client.get("/listings?days=xyz")
+        assert resp.status_code == 200
+
+    def test_negative_min_score(self, client, seeded_db):
+        resp = client.get("/listings?min_score=-1")
+        assert resp.status_code == 200
+
+    def test_float_min_score(self, client, seeded_db):
+        resp = client.get("/listings?min_score=3.5")
+        assert resp.status_code == 200
+
+    def test_float_days(self, client, seeded_db):
+        resp = client.get("/listings?days=7.5")
+        assert resp.status_code == 200
+
+    def test_very_large_days(self, client, seeded_db):
+        resp = client.get("/listings?days=99999")
+        assert resp.status_code == 200
+
+    def test_sort_score_with_empty_filters(self, client, seeded_db):
+        resp = client.get("/listings?sort=score&min_score=&days=")
+        assert resp.status_code == 200
+
+    def test_api_limit_zero(self, client, seeded_db):
+        resp = client.get("/api/listings?limit=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        # limit=0 is falsy, so no limit applied
+        assert len(data) == 2
+
+    def test_api_limit_float(self, client, seeded_db):
+        resp = client.get("/api/listings?limit=1.9")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+
+
+# --- Dashboard Analysis Counts ---
+
+
+class TestDashboardAnalysisCounts:
+    def test_dashboard_zero_analyses(self, client, db):
+        """Dashboard with no analyses shows no top matches."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # No "85/100" or similar score text expected
+        assert "/100" not in resp.text
+
+    def test_dashboard_one_analysis(self, client, seeded_db):
+        """Dashboard with one analysis shows it in top matches."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "Python Developer" in resp.text
+        assert "85/100" in resp.text
+
+    def test_dashboard_more_than_ten(self, client, db):
+        """Dashboard shows at most 10 top matches."""
+        # Insert 15 listings with analyses
+        for i in range(15):
+            lid = upsert_listing(
+                db,
+                RawListing(
+                    title=f"Dev {i}",
+                    company=f"Co {i}",
+                    description="Coding",
+                    source="platsbanken",
+                    external_id=f"ext-top-{i}",
+                ),
+            )
+            save_analysis(
+                db,
+                AnalysisResult(
+                    listing_id=lid,
+                    match_score=90 - i,
+                    summary=f"Match {i}",
+                    profile_hash="abc123",
+                ),
+            )
+
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # The dashboard query uses limit=10, so at most 10 entries
+        text = resp.text
+        score_count = sum(1 for s in range(76, 91) if f"{s}/100" in text)
+        assert score_count <= 10
