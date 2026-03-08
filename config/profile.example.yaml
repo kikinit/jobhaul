@@ -66,6 +66,10 @@ sources:
     api_key: ""
   remoteok:
     enabled: true
+  linkedin:
+    enabled: false  # requires: pip install playwright && playwright install chromium
+  indeed:
+    enabled: false
 
 llm:
   adapter: claude-cli
