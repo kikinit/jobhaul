@@ -8,6 +8,12 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
+SCHEMA_VERSION = 2
+
+MIGRATIONS = {
+    2: "ALTER TABLE analyses ADD COLUMN analysis_error TEXT",
+}
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS listings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +61,27 @@ CREATE INDEX IF NOT EXISTS idx_listing_sources_listing_id
 
 CREATE INDEX IF NOT EXISTS idx_analyses_listing_id
     ON analyses(listing_id);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
 """
+
+
+def run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply pending schema migrations."""
+    current = conn.execute(
+        "SELECT COALESCE(MAX(version), 1) FROM schema_version"
+    ).fetchone()[0]
+    for version in sorted(MIGRATIONS):
+        if version > current:
+            conn.execute(MIGRATIONS[version])
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (version,)
+            )
+            conn.commit()
+            logger.info("Applied DB migration to version %d", version)
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
@@ -66,6 +92,16 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+
+    # Stamp current version on a brand-new database so migrations are skipped
+    row_count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
+    if row_count == 0:
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
+        conn.commit()
+
+    run_migrations(conn)
 
     # Merge any existing duplicates that slipped through with old normalization
     from jobhaul.db.queries import merge_existing_duplicates

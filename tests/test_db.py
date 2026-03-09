@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from jobhaul.db.queries import (
@@ -16,7 +18,7 @@ from jobhaul.db.queries import (
     save_analysis,
     upsert_listing,
 )
-from jobhaul.db.schema import init_db
+from jobhaul.db.schema import SCHEMA_VERSION, init_db, run_migrations
 from jobhaul.models import AnalysisResult, RawListing
 
 
@@ -458,3 +460,158 @@ class TestStats:
         assert stats["avg_score"] == 80.0
         assert stats["source_counts"]["platsbanken"] == 1
         assert stats["source_counts"]["remoteok"] == 1
+
+
+# -- Schema migration tests (Issue #16) ----------------------------------------
+
+# V1 schema: analyses table WITHOUT analysis_error column
+V1_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS listings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    description TEXT,
+    url TEXT,
+    published_at TEXT,
+    is_remote INTEGER DEFAULT 0,
+    employment_type TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS listing_sources (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    source_url TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    match_score INTEGER NOT NULL,
+    match_reasons TEXT,
+    missing_skills TEXT,
+    strengths TEXT,
+    concerns TEXT,
+    summary TEXT,
+    application_notes TEXT,
+    profile_hash TEXT NOT NULL,
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(listing_id, profile_hash)
+);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def _make_v1_db(db_path: str) -> sqlite3.Connection:
+    """Create a DB with V1 schema (no analysis_error column)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(V1_SCHEMA_SQL)
+    conn.commit()
+    return conn
+
+
+class TestMigrations:
+    """Test schema migration mechanism (Issue #16)."""
+
+    def test_fresh_db_at_current_version(self, tmp_path):
+        db_path = str(tmp_path / "fresh.db")
+        conn = init_db(db_path)
+        version = conn.execute(
+            "SELECT COALESCE(MAX(version), 1) FROM schema_version"
+        ).fetchone()[0]
+        assert version == SCHEMA_VERSION
+        conn.close()
+
+    def test_migrate_v1_adds_analysis_error(self, tmp_path):
+        db_path = str(tmp_path / "v1.db")
+        conn = _make_v1_db(db_path)
+
+        # Confirm column does NOT exist yet
+        cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()
+        ]
+        assert "analysis_error" not in cols
+
+        run_migrations(conn)
+
+        # Column should now exist
+        cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()
+        ]
+        assert "analysis_error" in cols
+
+        # Version should be bumped
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == 2
+        conn.close()
+
+    def test_migrations_idempotent(self, tmp_path):
+        db_path = str(tmp_path / "idem.db")
+        conn = _make_v1_db(db_path)
+
+        run_migrations(conn)
+        run_migrations(conn)  # second run should be a no-op
+
+        cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()
+        ]
+        assert cols.count("analysis_error") == 1
+
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == 2
+        conn.close()
+
+    def test_save_analysis_after_migration_error_none(self, tmp_path):
+        db_path = str(tmp_path / "migrated.db")
+        conn = _make_v1_db(db_path)
+        run_migrations(conn)
+
+        conn.execute(
+            "INSERT INTO listings (title, company, created_at) VALUES ('Dev', 'Co', datetime('now'))"
+        )
+        conn.commit()
+        listing_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        result = AnalysisResult(
+            listing_id=listing_id, match_score=75, profile_hash="h1",
+            analysis_error=None,
+        )
+        save_analysis(conn, result)
+
+        row = get_analysis(conn, listing_id)
+        assert row is not None
+        assert row.analysis_error is None
+        conn.close()
+
+    def test_save_analysis_after_migration_error_set(self, tmp_path):
+        db_path = str(tmp_path / "migrated2.db")
+        conn = _make_v1_db(db_path)
+        run_migrations(conn)
+
+        conn.execute(
+            "INSERT INTO listings (title, company, created_at) VALUES ('Dev', 'Co', datetime('now'))"
+        )
+        conn.commit()
+        listing_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        result = AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h2",
+            analysis_error="LLM timeout after 60s",
+        )
+        save_analysis(conn, result)
+
+        row = get_analysis(conn, listing_id)
+        assert row is not None
+        assert row.analysis_error == "LLM timeout after 60s"
+        conn.close()
