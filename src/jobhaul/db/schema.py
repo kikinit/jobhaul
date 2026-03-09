@@ -8,10 +8,11 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS = {
     2: "ALTER TABLE analyses ADD COLUMN analysis_error TEXT",
+    3: "ALTER TABLE analyses ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
 }
 
 SCHEMA_SQL = """
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     summary TEXT,
     application_notes TEXT,
     analysis_error TEXT,
+    fail_count INTEGER NOT NULL DEFAULT 0,
     profile_hash TEXT NOT NULL,
     analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(listing_id, profile_hash)

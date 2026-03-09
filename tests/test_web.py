@@ -389,3 +389,141 @@ class TestDashboardAnalysisCounts:
         text = resp.text
         score_count = sum(1 for s in range(76, 91) if f"{s}/100" in text)
         assert score_count <= 10
+
+
+class TestAnalysisErrorBadges:
+    """Test warning/error badges for failed analyses (Issue #17)."""
+
+    def test_listings_page_shows_warning_for_failed(self, client, db):
+        """Listings page shows warning badge for analysis with error."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Failed Analysis Job",
+                company="ErrorCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-fail-1",
+            ),
+        )
+        save_analysis(
+            db,
+            AnalysisResult(
+                listing_id=listing_id,
+                match_score=0,
+                profile_hash="abc123",
+                analysis_error="LLM timeout after 90s",
+            ),
+        )
+        resp = client.get("/listings")
+        assert resp.status_code == 200
+        # Should contain warning emoji (&#9888; = ⚠)
+        assert "&#9888;" in resp.text or "\u26a0" in resp.text
+
+    def test_listings_page_shows_error_for_permanently_failed(self, client, db):
+        """Listings page shows error badge for fail_count >= 5."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Perm Failed Job",
+                company="FailCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-permfail-1",
+            ),
+        )
+        # Simulate 5 failures
+        for i in range(5):
+            save_analysis(
+                db,
+                AnalysisResult(
+                    listing_id=listing_id,
+                    match_score=0,
+                    profile_hash="abc123",
+                    analysis_error=f"timeout {i+1}",
+                ),
+            )
+        resp = client.get("/listings")
+        assert resp.status_code == 200
+        # Should contain cross mark emoji (&#10060; = ❌)
+        assert "&#10060;" in resp.text
+
+    def test_detail_shows_error_message(self, client, db):
+        """Detail page shows the actual error message."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Error Detail Job",
+                company="ErrCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-errdetail-1",
+            ),
+        )
+        save_analysis(
+            db,
+            AnalysisResult(
+                listing_id=listing_id,
+                match_score=0,
+                profile_hash="abc123",
+                analysis_error="Connection refused to API",
+            ),
+        )
+        resp = client.get(f"/listings/{listing_id}")
+        assert resp.status_code == 200
+        assert "Connection refused to API" in resp.text
+        assert "Analysis Error" in resp.text
+
+    def test_detail_shows_fail_count(self, client, db):
+        """Detail page shows fail count when > 0."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Fail Count Job",
+                company="CountCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-fc-1",
+            ),
+        )
+        # 3 failures
+        for i in range(3):
+            save_analysis(
+                db,
+                AnalysisResult(
+                    listing_id=listing_id,
+                    match_score=0,
+                    profile_hash="abc123",
+                    analysis_error=f"timeout {i+1}",
+                ),
+            )
+        resp = client.get(f"/listings/{listing_id}")
+        assert resp.status_code == 200
+        assert "Fail Count" in resp.text
+        assert "3/5" in resp.text
+
+    def test_dashboard_shows_warning_badge(self, client, db):
+        """Dashboard shows warning badge for failed analysis in top matches."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Dashboard Warn Job",
+                company="WarnCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-dashwarn-1",
+            ),
+        )
+        save_analysis(
+            db,
+            AnalysisResult(
+                listing_id=listing_id,
+                match_score=1,
+                profile_hash="abc123",
+                analysis_error="timeout",
+            ),
+        )
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # Warning badge should show for analysis with error
+        assert "&#9888;" in resp.text or "\u26a0" in resp.text

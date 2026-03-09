@@ -110,6 +110,7 @@ class AnalysisResult(BaseModel):
     summary: str | None = None
     application_notes: str | None = None
     analysis_error: str | None = None
+    fail_count: int = 0
     profile_hash: str = ""
     analyzed_at: str = ""
 

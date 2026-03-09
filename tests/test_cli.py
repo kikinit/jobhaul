@@ -245,3 +245,51 @@ class TestScanCommand:
             result = runner.invoke(app, ["scan", "--skip-analysis"])
             assert result.exit_code == 0
             assert "Total:" in result.output
+
+
+class TestScanRetryFailed:
+    """Test --retry-failed flag (Issue #17)."""
+
+    def test_retry_failed_no_failures(self, mock_db, mock_profile):
+        """--retry-failed with no failed analyses prints message."""
+        result = runner.invoke(app, ["scan", "--retry-failed"])
+        assert result.exit_code == 0
+        assert "No failed analyses to retry" in result.output
+
+    def test_retry_failed_queues_failed(self, mock_db, mock_profile):
+        from unittest.mock import AsyncMock, patch as mock_patch
+
+        from jobhaul.db.queries import save_analysis, upsert_listing
+
+        # Insert a listing with a failed analysis
+        listing_id = upsert_listing(
+            mock_db,
+            RawListing(
+                title="Failed Job",
+                company="Co",
+                source="platsbanken",
+                external_id="fail-1",
+            ),
+        )
+        save_analysis(
+            mock_db,
+            AnalysisResult(
+                listing_id=listing_id,
+                match_score=0,
+                profile_hash="test-hash",
+                analysis_error="LLM timeout",
+            ),
+        )
+
+        # Mock the adapter and analyze_listing to return success
+        mock_result = AnalysisResult(
+            listing_id=listing_id,
+            match_score=75,
+            profile_hash="test-hash",
+        )
+
+        with mock_patch("jobhaul.analysis.claude_cli.ClaudeCliAdapter"),              mock_patch("jobhaul.analysis.matcher.compute_profile_hash", return_value="test-hash"),              mock_patch("jobhaul.analysis.matcher.analyze_listing", new_callable=AsyncMock, return_value=mock_result):
+            result = runner.invoke(app, ["scan", "--retry-failed"])
+
+        assert result.exit_code == 0
+        assert "Retrying 1 failed" in result.output

@@ -224,11 +224,23 @@ def _deserialize_list(value: str | None) -> list[str]:
 
 def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
     """Save an analysis result (upsert on listing_id+profile_hash)."""
+    # On failure, increment fail_count from existing row
+    fail_count = result.fail_count
+    if result.analysis_error:
+        existing = conn.execute(
+            "SELECT fail_count FROM analyses WHERE listing_id = ? AND profile_hash = ?",
+            (result.listing_id, result.profile_hash),
+        ).fetchone()
+        if existing:
+            fail_count = existing["fail_count"] + 1
+        else:
+            fail_count = 1
+
     cursor = conn.execute(
         """INSERT INTO analyses
            (listing_id, match_score, match_reasons, missing_skills, strengths,
-            concerns, summary, application_notes, analysis_error, profile_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            concerns, summary, application_notes, analysis_error, fail_count, profile_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(listing_id, profile_hash) DO UPDATE SET
                match_score=excluded.match_score,
                match_reasons=excluded.match_reasons,
@@ -238,6 +250,7 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
                summary=excluded.summary,
                application_notes=excluded.application_notes,
                analysis_error=excluded.analysis_error,
+               fail_count=excluded.fail_count,
                analyzed_at=datetime('now')""",
         (
             result.listing_id,
@@ -249,6 +262,7 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
             result.summary,
             result.application_notes,
             result.analysis_error,
+            fail_count,
             result.profile_hash,
         ),
     )
@@ -274,6 +288,7 @@ def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | 
         summary=row["summary"],
         application_notes=row["application_notes"],
         analysis_error=row["analysis_error"],
+        fail_count=row["fail_count"],
         profile_hash=row["profile_hash"],
         analyzed_at=row["analyzed_at"],
     )
@@ -282,12 +297,68 @@ def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | 
 def get_unanalyzed_listings(
     conn: sqlite3.Connection, profile_hash: str, limit: int | None = None
 ) -> list[JobListing]:
-    """Get listings that haven't been analyzed with this profile hash."""
+    """Get listings that haven't been successfully analyzed with this profile hash.
+
+    Also re-queues listings whose latest analysis has analysis_error set,
+    unless fail_count >= 5 (permanently failed).
+    """
     query = """
         SELECT l.* FROM listings l
         WHERE NOT EXISTS (
             SELECT 1 FROM analyses a
             WHERE a.listing_id = l.id AND a.profile_hash = ?
+              AND a.analysis_error IS NULL
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM analyses a
+            WHERE a.listing_id = l.id AND a.profile_hash = ?
+              AND a.fail_count >= 5
+        )
+        ORDER BY l.created_at DESC
+    """
+    params: list = [profile_hash, profile_hash]
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    listings = []
+    for row in rows:
+        sources = [
+            r["source"]
+            for r in conn.execute(
+                "SELECT source FROM listing_sources WHERE listing_id = ?", (row["id"],)
+            ).fetchall()
+        ]
+        listings.append(
+            JobListing(
+                id=row["id"],
+                title=row["title"],
+                company=row["company"],
+                location=row["location"],
+                description=row["description"],
+                url=row["url"],
+                published_at=row["published_at"],
+                is_remote=bool(row["is_remote"]),
+                employment_type=row["employment_type"],
+                sources=sources,
+                created_at=row["created_at"],
+            )
+        )
+    return listings
+
+
+def get_failed_listings(
+    conn: sqlite3.Connection, profile_hash: str, limit: int | None = None
+) -> list[JobListing]:
+    """Get listings with analysis_error set (for --retry-failed)."""
+    query = """
+        SELECT l.* FROM listings l
+        WHERE EXISTS (
+            SELECT 1 FROM analyses a
+            WHERE a.listing_id = l.id AND a.profile_hash = ?
+              AND a.analysis_error IS NOT NULL
+              AND a.fail_count < 5
         )
         ORDER BY l.created_at DESC
     """

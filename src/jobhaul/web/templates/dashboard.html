@@ -52,7 +52,15 @@
         <tr>
             <td><a href="/listings/{{ item.listing.id }}">{{ item.listing.title[:60] }}</a></td>
             <td>{{ item.listing.company or "?" }}</td>
-            <td>{{ item.analysis.match_score }}/100</td>
+            <td>
+                {% if item.analysis.fail_count >= 5 %}
+                    &#10060; {{ item.analysis.match_score }}/100
+                {% elif item.analysis.analysis_error %}
+                    &#9888;&#65039; {{ item.analysis.match_score }}/100
+                {% else %}
+                    {{ item.analysis.match_score }}/100
+                {% endif %}
+            </td>
             <td>{{ item.listing.sources | join(", ") }}</td>
         </tr>
     {% endfor %}

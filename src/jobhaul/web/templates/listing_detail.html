@@ -34,8 +34,20 @@
 {% if analysis %}
 <article>
     <header>
-        <h2>Analysis — Score: {{ analysis.match_score }}/100</h2>
+        <h2>Analysis — Score: {{ analysis.match_score }}/100
+        {% if analysis.fail_count >= 5 %}
+            <span title="Permanently failed after {{ analysis.fail_count }} attempts">&#10060;</span>
+        {% elif analysis.analysis_error %}
+            <span title="Analysis failed: {{ analysis.analysis_error }}">&#9888;&#65039;</span>
+        {% endif %}
+        </h2>
     </header>
+    {% if analysis.analysis_error %}
+    <p><strong>Analysis Error:</strong> <code>{{ analysis.analysis_error }}</code></p>
+    {% if analysis.fail_count > 0 %}
+    <p><strong>Fail Count:</strong> {{ analysis.fail_count }}/5</p>
+    {% endif %}
+    {% endif %}
     {% if analysis.summary %}
     <p><strong>Summary:</strong> {{ analysis.summary }}</p>
     {% endif %}

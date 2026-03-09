@@ -10,6 +10,7 @@ from jobhaul.db.queries import (
     _normalize_for_dedup,
     find_duplicate,
     get_analysis,
+    get_failed_listings,
     get_listing,
     get_stats,
     get_unanalyzed_listings,
@@ -553,7 +554,19 @@ class TestMigrations:
 
         # Version should be bumped
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 2
+        assert version == 3
+        conn.close()
+
+    def test_migrate_v1_adds_fail_count(self, tmp_path):
+        db_path = str(tmp_path / "v1_fc.db")
+        conn = _make_v1_db(db_path)
+
+        run_migrations(conn)
+
+        cols = [
+            r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()
+        ]
+        assert "fail_count" in cols
         conn.close()
 
     def test_migrations_idempotent(self, tmp_path):
@@ -567,9 +580,10 @@ class TestMigrations:
             r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()
         ]
         assert cols.count("analysis_error") == 1
+        assert cols.count("fail_count") == 1
 
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 2
+        assert version == 3
         conn.close()
 
     def test_save_analysis_after_migration_error_none(self, tmp_path):
@@ -615,3 +629,210 @@ class TestMigrations:
         assert row is not None
         assert row.analysis_error == "LLM timeout after 60s"
         conn.close()
+
+
+# V2 schema: analyses table WITH analysis_error but WITHOUT fail_count
+V2_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS listings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    description TEXT,
+    url TEXT,
+    published_at TEXT,
+    is_remote INTEGER DEFAULT 0,
+    employment_type TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS listing_sources (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    source_url TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    match_score INTEGER NOT NULL,
+    match_reasons TEXT,
+    missing_skills TEXT,
+    strengths TEXT,
+    concerns TEXT,
+    summary TEXT,
+    application_notes TEXT,
+    analysis_error TEXT,
+    profile_hash TEXT NOT NULL,
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(listing_id, profile_hash)
+);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def _make_v2_db(db_path: str) -> sqlite3.Connection:
+    """Create a DB with V2 schema (has analysis_error, no fail_count)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(V2_SCHEMA_SQL)
+    conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+    conn.commit()
+    return conn
+
+
+class TestMigrateV2ToV3:
+    """Test v2 -> v3 migration adds fail_count column."""
+
+    def test_migrate_v2_adds_fail_count(self, tmp_path):
+        db_path = str(tmp_path / "v2.db")
+        conn = _make_v2_db(db_path)
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()]
+        assert "analysis_error" in cols
+        assert "fail_count" not in cols
+
+        run_migrations(conn)
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()]
+        assert "fail_count" in cols
+
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == 3
+        conn.close()
+
+
+# -- Retry failed analyses tests (Issue #17) ------------------------------------
+
+
+class TestRetryFailedAnalyses:
+    """Test that failed analyses are re-queued and fail_count tracks correctly."""
+
+    def test_unanalyzed_does_not_return_successful(self, conn, sample_listing):
+        """Listings with successful analysis should NOT appear in unanalyzed."""
+        listing_id = upsert_listing(conn, sample_listing)
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=85, profile_hash="h1",
+        ))
+        unanalyzed = get_unanalyzed_listings(conn, "h1")
+        assert len(unanalyzed) == 0
+
+    def test_unanalyzed_returns_failed(self, conn, sample_listing):
+        """Listings with analysis_error set SHOULD appear in unanalyzed."""
+        listing_id = upsert_listing(conn, sample_listing)
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h1",
+            analysis_error="LLM timeout",
+        ))
+        unanalyzed = get_unanalyzed_listings(conn, "h1")
+        assert len(unanalyzed) == 1
+        assert unanalyzed[0].id == listing_id
+
+    def test_unanalyzed_excludes_permanently_failed(self, conn, sample_listing):
+        """Listings with fail_count >= 5 should NOT appear in unanalyzed."""
+        listing_id = upsert_listing(conn, sample_listing)
+        # Simulate 5 failures by saving 5 times with error
+        for i in range(5):
+            save_analysis(conn, AnalysisResult(
+                listing_id=listing_id, match_score=0, profile_hash="h1",
+                analysis_error=f"LLM timeout attempt {i+1}",
+            ))
+        # Verify fail_count is 5
+        analysis = get_analysis(conn, listing_id)
+        assert analysis.fail_count == 5
+
+        unanalyzed = get_unanalyzed_listings(conn, "h1")
+        assert len(unanalyzed) == 0
+
+    def test_fail_count_increments(self, conn, sample_listing):
+        """fail_count should increment on each failed save."""
+        listing_id = upsert_listing(conn, sample_listing)
+
+        # First failure
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h1",
+            analysis_error="timeout 1",
+        ))
+        assert get_analysis(conn, listing_id).fail_count == 1
+
+        # Second failure
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h1",
+            analysis_error="timeout 2",
+        ))
+        assert get_analysis(conn, listing_id).fail_count == 2
+
+        # Third failure
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h1",
+            analysis_error="timeout 3",
+        ))
+        assert get_analysis(conn, listing_id).fail_count == 3
+
+    def test_successful_retry_clears_error(self, conn, sample_listing):
+        """A successful analysis after failures should clear the error."""
+        listing_id = upsert_listing(conn, sample_listing)
+
+        # First: failure
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=0, profile_hash="h1",
+            analysis_error="timeout",
+        ))
+        assert get_analysis(conn, listing_id).fail_count == 1
+        assert get_analysis(conn, listing_id).analysis_error == "timeout"
+
+        # Second: success (no analysis_error)
+        save_analysis(conn, AnalysisResult(
+            listing_id=listing_id, match_score=75, profile_hash="h1",
+            analysis_error=None,
+        ))
+        result = get_analysis(conn, listing_id)
+        assert result.analysis_error is None
+        assert result.match_score == 75
+        # fail_count is preserved from the model default (0) since no error
+        assert result.fail_count == 0
+
+    def test_get_failed_listings_returns_only_failed(self, conn, sample_listing):
+        """get_failed_listings should only return listings with analysis_error."""
+        id1 = upsert_listing(conn, sample_listing)
+        id2 = upsert_listing(conn, sample_listing.model_copy(
+            update={"title": "Other Job", "external_id": "ext-2"}
+        ))
+        id3 = upsert_listing(conn, sample_listing.model_copy(
+            update={"title": "Third Job", "external_id": "ext-3"}
+        ))
+
+        # id1: successful
+        save_analysis(conn, AnalysisResult(
+            listing_id=id1, match_score=80, profile_hash="h1",
+        ))
+        # id2: failed
+        save_analysis(conn, AnalysisResult(
+            listing_id=id2, match_score=0, profile_hash="h1",
+            analysis_error="API overloaded",
+        ))
+        # id3: no analysis at all
+
+        failed = get_failed_listings(conn, "h1")
+        assert len(failed) == 1
+        assert failed[0].id == id2
+
+    def test_get_failed_listings_excludes_permanently_failed(self, conn, sample_listing):
+        """get_failed_listings should not return listings with fail_count >= 5."""
+        listing_id = upsert_listing(conn, sample_listing)
+        for i in range(5):
+            save_analysis(conn, AnalysisResult(
+                listing_id=listing_id, match_score=0, profile_hash="h1",
+                analysis_error=f"timeout {i+1}",
+            ))
+        failed = get_failed_listings(conn, "h1")
+        assert len(failed) == 0

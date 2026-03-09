@@ -55,7 +55,19 @@
             <td>{{ item.listing.location or "?" }}</td>
             <td>{{ "Yes" if item.listing.is_remote else "No" }}</td>
             <td>{{ item.listing.sources | join(", ") }}</td>
-            <td>{{ item.analysis.match_score ~ "/100" if item.analysis else "—" }}</td>
+            <td>
+                {% if item.analysis %}
+                    {% if item.analysis.fail_count >= 5 %}
+                        &#10060; {{ item.analysis.match_score }}/100
+                    {% elif item.analysis.analysis_error %}
+                        &#9888;&#65039; {{ item.analysis.match_score }}/100
+                    {% else %}
+                        {{ item.analysis.match_score }}/100
+                    {% endif %}
+                {% else %}
+                    —
+                {% endif %}
+            </td>
         </tr>
     {% endfor %}
     </tbody>

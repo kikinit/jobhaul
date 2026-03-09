@@ -34,18 +34,59 @@ def scan(
     analyze_only: bool = typer.Option(
         False, "--analyze-only", help="Skip collection, only analyze unanalyzed listings"
     ),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-queue only listings with analysis errors"
+    ),
     limit: Optional[int] = typer.Option(None, help="Max number of listings to analyze"),
 ):
     """Collect job listings and optionally analyze them."""
-    asyncio.run(_scan(source, skip_analysis, analyze_only, limit))
+    asyncio.run(_scan(source, skip_analysis, analyze_only, retry_failed, limit))
 
 
 async def _scan(
-    source: str | None, skip_analysis: bool, analyze_only: bool, limit: int | None
+    source: str | None, skip_analysis: bool, analyze_only: bool,
+    retry_failed: bool, limit: int | None,
 ):
     profile = load_profile()
     conn = _get_db()
     flags = profile.get_effective_flags()
+
+    if retry_failed:
+        # Only re-queue failed analyses, skip collection
+        from jobhaul.analysis.claude_cli import ClaudeCliAdapter
+        from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash, pre_screen
+        from jobhaul.db.queries import get_failed_listings, save_analysis
+        from jobhaul.flagging import flag_listing
+
+        profile_hash = compute_profile_hash(profile)
+        adapter = ClaudeCliAdapter(model=profile.llm.model)
+        failed = get_failed_listings(conn, profile_hash, limit=limit)
+
+        if not failed:
+            console.print("[dim]No failed analyses to retry.[/dim]")
+            conn.close()
+            return
+
+        console.print(f"\n[bold]Retrying {len(failed)} failed analyses...[/bold]")
+        for listing in failed:
+            try:
+                result = await analyze_listing(listing, profile, adapter)
+                save_analysis(conn, result)
+                if result.analysis_error:
+                    console.print(
+                        f"  [yellow]Still failing: {listing.title} @ "
+                        f"{listing.company or '?'}[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Recovered: {listing.title} @ "
+                        f"{listing.company or '?'}: score {result.match_score}[/green]"
+                    )
+            except Exception as e:
+                console.print(f"  [red]Error analyzing {listing.title}: {e}[/red]")
+
+        conn.close()
+        return
 
     if not analyze_only:
         # Import collectors to trigger registration
