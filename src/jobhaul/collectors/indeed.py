@@ -1,25 +1,24 @@
-"""Indeed job listings scraper using Playwright."""
+"""Indeed job listings collector using Apify API."""
 
 from __future__ import annotations
 
-import re
+import asyncio
+import hashlib
+
+import httpx
 
 from jobhaul.collectors.base import Collector, detect_remote
 from jobhaul.collectors.registry import register
-from jobhaul.collectors.stealth import (
-    CircuitBreaker,
-    RequestCounter,
-    create_stealth_context,
-    random_delay,
-)
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
 logger = get_logger(__name__)
 
-BASE_URL_TEMPLATE = "https://{country}.indeed.com/jobs"
-MAX_PAGES = 3
-RESULTS_PER_PAGE = 10  # Indeed shows ~15 per page, pagination uses increments of 10
+ACTOR_ID = "apify~indeed-scraper"
+APIFY_RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
+APIFY_DATASET_URL = "https://api.apify.com/v2/datasets"
+POLL_INTERVAL = 10
+TIMEOUT = 300  # 5 minutes
 
 
 @register
@@ -31,181 +30,106 @@ class IndeedCollector(Collector):
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
 
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
+        token = source_config.apify_token
+        if not token:
             return CollectorResult(
                 source=self.name,
-                errors=["Playwright not installed. Run: pip install playwright && playwright install chromium"],
+                errors=["Indeed Apify token not configured"],
             )
 
-        scraping = profile.scraping
-        country = source_config.region or "se"
-        base_url = BASE_URL_TEMPLATE.format(country=country)
         listings: list[RawListing] = []
         errors: list[str] = []
-        seen_ids: set[str] = set()
-        circuit_breaker = CircuitBreaker()
-        request_counter = RequestCounter(scraping.max_requests_per_run)
+        country = (source_config.region or "SE").upper()
+        position = profile.search_terms[0] if profile.search_terms else ""
 
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-
-                for term in profile.search_terms:
-                    if circuit_breaker.is_open:
-                        msg = "Indeed: circuit breaker open, aborting remaining searches"
-                        logger.warning(msg)
-                        errors.append(msg)
-                        break
-                    if request_counter.limit_reached:
-                        msg = "Indeed: request limit reached, stopping"
-                        logger.warning(msg)
-                        errors.append(msg)
-                        break
-
-                    # New context per search term for session isolation
-                    context = await create_stealth_context(browser, scraping)
-                    page = await context.new_page()
-
-                    try:
-                        term_listings = await self._search_term(
-                            page, base_url, term, profile.location, seen_ids,
-                            scraping, circuit_breaker, request_counter,
-                        )
-                        listings.extend(term_listings)
-                    except Exception as e:
-                        msg = f"Indeed error searching '{term}': {e}"
-                        logger.warning(msg)
-                        errors.append(msg)
-                        circuit_breaker.record_failure()
-
-                    await context.close()
-                    await random_delay(scraping.delay_min, scraping.delay_max)
-
-                await browser.close()
-
-        except Exception as e:
-            msg = f"Indeed browser error: {e}"
-            logger.warning(msg)
-            errors.append(msg)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                run_id, dataset_id = await self._start_run(
+                    client, token, position, profile.location, country
+                )
+                await self._poll_until_done(client, token, run_id)
+                items = await self._fetch_results(client, token, dataset_id)
+                listings = self._map_results(items)
+            except Exception as e:
+                msg = f"Indeed Apify error: {e}"
+                logger.warning(msg)
+                errors.append(msg)
 
         logger.info("Indeed: collected %d listings", len(listings))
         return CollectorResult(source=self.name, listings=listings, errors=errors)
 
-    async def _search_term(
+    async def _start_run(
         self,
-        page,
-        base_url: str,
-        term: str,
+        client: httpx.AsyncClient,
+        token: str,
+        position: str,
         location: str,
-        seen_ids: set[str],
-        scraping,
-        circuit_breaker: CircuitBreaker,
-        request_counter: RequestCounter,
-    ) -> list[RawListing]:
-        listings: list[RawListing] = []
-
-        for page_num in range(MAX_PAGES):
-            if circuit_breaker.is_open or request_counter.limit_reached:
-                break
-
-            start = page_num * RESULTS_PER_PAGE
-            url = f"{base_url}?q={term}&l={location}&start={start}"
-
-            try:
-                request_counter.increment()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
-                circuit_breaker.record_success()
-            except Exception as e:
-                logger.warning("Indeed page load failed: %s", e)
-                circuit_breaker.record_failure()
-                break
-
-            job_cards = await page.query_selector_all(".job_seen_beacon, .jobsearch-ResultsList .result")
-            if not job_cards:
-                # Try alternative selector
-                job_cards = await page.query_selector_all("[data-jk]")
-
-            if not job_cards:
-                break
-
-            for card in job_cards:
-                try:
-                    listing = await self._parse_card(card, base_url, seen_ids)
-                    if listing:
-                        listings.append(listing)
-                except Exception as e:
-                    logger.debug("Failed to parse Indeed card: %s", e)
-                    continue
-
-            if len(job_cards) < RESULTS_PER_PAGE:
-                break
-
-            await random_delay(scraping.delay_min, scraping.delay_max)
-
-        return listings
-
-    async def _parse_card(self, card, base_url: str, seen_ids: set[str]) -> RawListing | None:
-        # Try to get the job key from data attribute
-        ext_id = await card.get_attribute("data-jk") or ""
-
-        title_el = await card.query_selector("h2.jobTitle a, .jobTitle > a, a[data-jk]")
-        company_el = await card.query_selector("[data-testid='company-name'], .companyName, .company")
-        location_el = await card.query_selector("[data-testid='text-location'], .companyLocation, .location")
-        salary_el = await card.query_selector("[data-testid='attribute_snippet_testid'], .salary-snippet-container")
-        snippet_el = await card.query_selector(".job-snippet, .underShelfFooter, [class*='job-snippet']")
-
-        title = (await title_el.inner_text()).strip() if title_el else None
-        if not title:
-            return None
-
-        # Get URL from the title link
-        url = None
-        if title_el:
-            href = await title_el.get_attribute("href")
-            if href:
-                if href.startswith("/"):
-                    # Build absolute URL from the base domain
-                    domain = "/".join(base_url.split("/")[:3])
-                    url = domain + href
-                else:
-                    url = href
-
-        if not ext_id and title_el:
-            ext_id = await title_el.get_attribute("data-jk") or ""
-
-        if not ext_id and url:
-            match = re.search(r"jk=([a-f0-9]+)", url)
-            if match:
-                ext_id = match.group(1)
-
-        if ext_id in seen_ids:
-            return None
-        if ext_id:
-            seen_ids.add(ext_id)
-
-        company = (await company_el.inner_text()).strip() if company_el else None
-        location = (await location_el.inner_text()).strip() if location_el else None
-        salary = (await salary_el.inner_text()).strip() if salary_el else None
-        snippet = (await snippet_el.inner_text()).strip() if snippet_el else ""
-
-        desc_parts = []
-        if snippet:
-            desc_parts.append(snippet)
-        if salary:
-            desc_parts.append(f"Salary: {salary}")
-        description = "\n".join(desc_parts) if desc_parts else f"Indeed job: {title}"
-
-        return RawListing(
-            title=title,
-            company=company,
-            location=location,
-            description=description[:5000],
-            url=url,
-            is_remote=detect_remote(title, f"{location or ''} {snippet}"),
-            source=self.name,
-            external_id=ext_id or title,
-            source_url=url,
+        country: str,
+    ) -> tuple[str, str]:
+        body = {
+            "position": position,
+            "location": location,
+            "maxItems": 50,
+            "country": country,
+        }
+        resp = await client.post(
+            f"{APIFY_RUN_URL}?token={token}", json=body
         )
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        return data["id"], data["defaultDatasetId"]
+
+    async def _poll_until_done(
+        self, client: httpx.AsyncClient, token: str, run_id: str
+    ) -> None:
+        url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}"
+        elapsed = 0
+        while elapsed < TIMEOUT:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            status = resp.json()["data"]["status"]
+            if status == "SUCCEEDED":
+                return
+            if status in ("FAILED", "ABORTED", "TIMED-OUT"):
+                raise RuntimeError(f"Apify actor run {status}")
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+        raise TimeoutError("Apify actor run timed out after 5 minutes")
+
+    async def _fetch_results(
+        self, client: httpx.AsyncClient, token: str, dataset_id: str
+    ) -> list[dict]:
+        url = f"{APIFY_DATASET_URL}/{dataset_id}/items?token={token}"
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _map_results(self, items: list[dict]) -> list[RawListing]:
+        listings: list[RawListing] = []
+        seen: set[str] = set()
+        for item in items:
+            url = item.get("url") or ""
+            if not url:
+                continue
+            ext_id = hashlib.sha256(url.encode()).hexdigest()[:16]
+            if ext_id in seen:
+                continue
+            seen.add(ext_id)
+
+            title = item.get("positionName") or ""
+            location = item.get("location") or ""
+            listings.append(
+                RawListing(
+                    title=title,
+                    company=item.get("company"),
+                    location=location,
+                    description=item.get("description"),
+                    url=url,
+                    published_at=item.get("datePosted"),
+                    is_remote=detect_remote(title, location),
+                    source=self.name,
+                    external_id=ext_id,
+                    source_url=url,
+                )
+            )
+        return listings

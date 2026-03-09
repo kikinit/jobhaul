@@ -1,39 +1,12 @@
-"""Tests for LinkedIn and Indeed collectors with mocked Playwright."""
+"""Tests for LinkedIn and Indeed Apify collectors — unit tests for mapping logic."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import hashlib
 
 import pytest
 
 from jobhaul.models import Profile, SourceConfig
-
-
-def _mock_element(text=None, href=None, datetime=None, data_jk=None):
-    """Create a mock page element."""
-    el = AsyncMock()
-    el.inner_text = AsyncMock(return_value=text or "")
-    el.get_attribute = AsyncMock(side_effect=lambda attr: {
-        "href": href,
-        "datetime": datetime,
-        "data-jk": data_jk,
-    }.get(attr))
-    return el
-
-
-def _mock_card(elements: dict):
-    """Create a mock job card that returns specific elements for selectors."""
-    card = AsyncMock()
-
-    async def query_selector(selector):
-        for key, el in elements.items():
-            if key in selector:
-                return el
-        return None
-
-    card.query_selector = AsyncMock(side_effect=query_selector)
-    card.get_attribute = AsyncMock(return_value=elements.get("data-jk"))
-    return card
 
 
 @pytest.fixture
@@ -45,8 +18,8 @@ def profile():
         skills=["Python"],
         location="Stockholm",
         sources={
-            "linkedin": SourceConfig(enabled=True),
-            "indeed": SourceConfig(enabled=True, region="se"),
+            "linkedin": SourceConfig(enabled=True, apify_token="test-token"),
+            "indeed": SourceConfig(enabled=True, apify_token="test-token", region="SE"),
         },
     )
 
@@ -66,65 +39,75 @@ class TestLinkedInCollector:
         assert result.errors == []
 
     @pytest.mark.asyncio
-    async def test_collect_no_playwright(self, profile):
+    async def test_collect_no_token(self):
         from jobhaul.collectors.linkedin import LinkedInCollector
 
-        with patch.dict("sys.modules", {"playwright": None, "playwright.async_api": None}):
-            collector = LinkedInCollector()
-            # Force reimport check
-            with patch("jobhaul.collectors.linkedin.LinkedInCollector.collect") as mock_collect:
-                mock_collect.return_value = MagicMock(
-                    source="linkedin", listings=[], errors=["Playwright not installed"]
-                )
-                result = await mock_collect(profile)
-                assert len(result.errors) >= 1
+        profile = Profile(
+            name="Test",
+            search_terms=["python"],
+            sources={"linkedin": SourceConfig(enabled=True, apify_token="")},
+        )
+        collector = LinkedInCollector()
+        result = await collector.collect(profile)
+        assert len(result.errors) == 1
+        assert "token" in result.errors[0].lower()
 
-    @pytest.mark.asyncio
-    async def test_parse_card(self):
+    def test_map_results(self):
         from jobhaul.collectors.linkedin import LinkedInCollector
 
         collector = LinkedInCollector()
-        seen = set()
+        items = [
+            {
+                "title": "Python Dev",
+                "companyName": "Acme Corp",
+                "location": "Stockholm",
+                "description": "Build stuff",
+                "jobUrl": "https://linkedin.com/jobs/view/123",
+                "publishedAt": "2024-01-15",
+            },
+        ]
+        listings = collector._map_results(items)
+        assert len(listings) == 1
+        assert listings[0].title == "Python Dev"
+        assert listings[0].company == "Acme Corp"
+        assert listings[0].location == "Stockholm"
+        assert listings[0].source == "linkedin"
+        expected_id = hashlib.sha256(b"https://linkedin.com/jobs/view/123").hexdigest()[:16]
+        assert listings[0].external_id == expected_id
 
-        card = _mock_card({
-            "base-search-card__title": _mock_element(text="Python Dev"),
-            "base-search-card__subtitle": _mock_element(text="Acme Corp"),
-            "job-search-card__location": _mock_element(text="Stockholm"),
-            "base-card__full-link": _mock_element(href="https://linkedin.com/jobs/view/python-dev-12345"),
-            "time": _mock_element(datetime="2024-01-15"),
-        })
-
-        listing = await collector._parse_card(card, seen)
-        assert listing is not None
-        assert listing.title == "Python Dev"
-        assert listing.company == "Acme Corp"
-        assert listing.location == "Stockholm"
-        assert listing.source == "linkedin"
-        assert "12345" in listing.external_id
-
-    @pytest.mark.asyncio
-    async def test_parse_card_dedup(self):
+    def test_map_results_dedup(self):
         from jobhaul.collectors.linkedin import LinkedInCollector
 
         collector = LinkedInCollector()
-        seen = {"12345"}
+        items = [
+            {"title": "Dev", "jobUrl": "https://linkedin.com/jobs/view/123"},
+            {"title": "Dev", "jobUrl": "https://linkedin.com/jobs/view/123"},
+        ]
+        listings = collector._map_results(items)
+        assert len(listings) == 1
 
-        card = _mock_card({
-            "base-search-card__title": _mock_element(text="Python Dev"),
-            "base-card__full-link": _mock_element(href="https://linkedin.com/jobs/view/python-dev-12345"),
-        })
-
-        listing = await collector._parse_card(card, seen)
-        assert listing is None
-
-    @pytest.mark.asyncio
-    async def test_parse_card_no_title(self):
+    def test_map_results_no_url(self):
         from jobhaul.collectors.linkedin import LinkedInCollector
 
         collector = LinkedInCollector()
-        card = _mock_card({})
-        listing = await collector._parse_card(card, set())
-        assert listing is None
+        items = [{"title": "Dev"}]
+        listings = collector._map_results(items)
+        assert len(listings) == 0
+
+    def test_map_results_remote_detection(self):
+        from jobhaul.collectors.linkedin import LinkedInCollector
+
+        collector = LinkedInCollector()
+        items = [
+            {
+                "title": "Remote Python Dev",
+                "location": "Remote",
+                "jobUrl": "https://linkedin.com/jobs/view/789",
+            },
+        ]
+        listings = collector._map_results(items)
+        assert len(listings) == 1
+        assert listings[0].is_remote is True
 
 
 class TestIndeedCollector:
@@ -142,57 +125,66 @@ class TestIndeedCollector:
         assert result.errors == []
 
     @pytest.mark.asyncio
-    async def test_parse_card(self):
+    async def test_collect_no_token(self):
+        from jobhaul.collectors.indeed import IndeedCollector
+
+        profile = Profile(
+            name="Test",
+            search_terms=["python"],
+            sources={"indeed": SourceConfig(enabled=True, apify_token="")},
+        )
+        collector = IndeedCollector()
+        result = await collector.collect(profile)
+        assert len(result.errors) == 1
+        assert "token" in result.errors[0].lower()
+
+    def test_map_results(self):
         from jobhaul.collectors.indeed import IndeedCollector
 
         collector = IndeedCollector()
-        seen = set()
+        items = [
+            {
+                "positionName": "Backend Dev",
+                "company": "TechCo",
+                "location": "Stockholm",
+                "description": "Build APIs",
+                "url": "https://indeed.com/viewjob?jk=abc123",
+                "datePosted": "2024-02-01",
+            },
+        ]
+        listings = collector._map_results(items)
+        assert len(listings) == 1
+        assert listings[0].title == "Backend Dev"
+        assert listings[0].company == "TechCo"
+        assert listings[0].source == "indeed"
+        expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
+        assert listings[0].external_id == expected_id
 
-        card = _mock_card({
-            "jobTitle": _mock_element(text="Backend Dev", href="/rc/clk?jk=abc123"),
-            "company-name": _mock_element(text="TechCo"),
-            "text-location": _mock_element(text="Stockholm"),
-            "attribute_snippet": _mock_element(text="50 000 SEK"),
-            "job-snippet": _mock_element(text="Build APIs with Python"),
-            "data-jk": "abc123",
-        })
-        card.get_attribute = AsyncMock(return_value="abc123")
-
-        listing = await collector._parse_card(card, "https://se.indeed.com/jobs", seen)
-        assert listing is not None
-        assert listing.title == "Backend Dev"
-        assert listing.company == "TechCo"
-        assert listing.source == "indeed"
-        assert listing.external_id == "abc123"
-
-    @pytest.mark.asyncio
-    async def test_parse_card_dedup(self):
+    def test_map_results_dedup(self):
         from jobhaul.collectors.indeed import IndeedCollector
 
         collector = IndeedCollector()
-        seen = {"abc123"}
+        items = [
+            {"positionName": "Dev", "url": "https://indeed.com/viewjob?jk=abc"},
+            {"positionName": "Dev", "url": "https://indeed.com/viewjob?jk=abc"},
+        ]
+        listings = collector._map_results(items)
+        assert len(listings) == 1
 
-        card = _mock_card({
-            "jobTitle": _mock_element(text="Backend Dev", href="/rc/clk?jk=abc123"),
-        })
-        card.get_attribute = AsyncMock(return_value="abc123")
-
-        listing = await collector._parse_card(card, "https://se.indeed.com/jobs", seen)
-        assert listing is None
-
-    @pytest.mark.asyncio
-    async def test_parse_card_no_title(self):
+    def test_map_results_no_url(self):
         from jobhaul.collectors.indeed import IndeedCollector
 
         collector = IndeedCollector()
-        card = _mock_card({})
-        card.get_attribute = AsyncMock(return_value=None)
-        listing = await collector._parse_card(card, "https://se.indeed.com/jobs", set())
-        assert listing is None
+        items = [{"positionName": "Dev"}]
+        listings = collector._map_results(items)
+        assert len(listings) == 0
 
-    @pytest.mark.asyncio
-    async def test_country_config(self):
-        from jobhaul.collectors.indeed import BASE_URL_TEMPLATE
+    def test_actor_id(self):
+        from jobhaul.collectors.indeed import ACTOR_ID
 
-        assert BASE_URL_TEMPLATE.format(country="se") == "https://se.indeed.com/jobs"
-        assert BASE_URL_TEMPLATE.format(country="com") == "https://com.indeed.com/jobs"
+        assert ACTOR_ID == "apify~indeed-scraper"
+
+    def test_linkedin_actor_id(self):
+        from jobhaul.collectors.linkedin import ACTOR_ID
+
+        assert ACTOR_ID == "fetchclub~linkedin-jobs-scraper"

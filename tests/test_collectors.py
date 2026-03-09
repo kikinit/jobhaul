@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 import respx
 
 from jobhaul.collectors.base import detect_remote
+from jobhaul.collectors.indeed import IndeedCollector
 from jobhaul.collectors.jooble import JoobleCollector
+from jobhaul.collectors.linkedin import LinkedInCollector
 from jobhaul.collectors.platsbanken import PlatsbankenCollector
 from jobhaul.collectors.remoteok import RemoteOKCollector
 from jobhaul.models import Profile, SourceConfig
@@ -27,6 +31,34 @@ def profile():
             "platsbanken": SourceConfig(enabled=True, region="abc"),
             "remoteok": SourceConfig(enabled=True),
             "jooble": SourceConfig(enabled=True, api_key="test-key"),
+        },
+    )
+
+
+@pytest.fixture
+def linkedin_profile():
+    return Profile(
+        name="Test",
+        roles=["developer"],
+        search_terms=["junior developer"],
+        skills=["Python"],
+        location="Stockholm",
+        sources={
+            "linkedin": SourceConfig(enabled=True, apify_token="test-token"),
+        },
+    )
+
+
+@pytest.fixture
+def indeed_profile():
+    return Profile(
+        name="Test",
+        roles=["developer"],
+        search_terms=["junior developer"],
+        skills=["Python"],
+        location="Sweden",
+        sources={
+            "indeed": SourceConfig(enabled=True, apify_token="test-token", region="SE"),
         },
     )
 
@@ -250,4 +282,235 @@ class TestJooble:
         )
         collector = JoobleCollector()
         result = await collector.collect(profile)
+        assert result.listings == []
+
+
+# --- LinkedIn Apify tests ---
+
+
+def _apify_run_response(run_id="run-1", dataset_id="ds-1", status="RUNNING"):
+    return {
+        "data": {
+            "id": run_id,
+            "defaultDatasetId": dataset_id,
+            "status": status,
+        }
+    }
+
+
+def _apify_status_response(status="SUCCEEDED"):
+    return {"data": {"status": status}}
+
+
+LINKEDIN_ITEMS = [
+    {
+        "title": "Python Developer",
+        "companyName": "Acme Corp",
+        "location": "Stockholm, Sweden",
+        "description": "Build Python apps",
+        "jobUrl": "https://linkedin.com/jobs/view/123",
+        "publishedAt": "2024-01-15",
+    },
+    {
+        "title": "Remote React Dev",
+        "companyName": "Remote Inc",
+        "location": "Remote",
+        "description": "Build React apps",
+        "jobUrl": "https://linkedin.com/jobs/view/456",
+        "publishedAt": "2024-01-16",
+    },
+]
+
+INDEED_ITEMS = [
+    {
+        "positionName": "Backend Engineer",
+        "company": "TechCo",
+        "location": "Gothenburg",
+        "description": "Work on backend systems",
+        "url": "https://indeed.com/viewjob?jk=abc123",
+        "datePosted": "2024-02-01",
+    },
+]
+
+
+class TestLinkedIn:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_success(self, linkedin_profile):
+        # Mock start run
+        respx.post(
+            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        # Mock poll status
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED"))
+        )
+        # Mock fetch results
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=LINKEDIN_ITEMS))
+
+        collector = LinkedInCollector()
+        result = await collector.collect(linkedin_profile)
+
+        assert result.source == "linkedin"
+        assert len(result.listings) == 2
+        assert result.listings[0].title == "Python Developer"
+        assert result.listings[0].company == "Acme Corp"
+        assert result.listings[0].location == "Stockholm, Sweden"
+        assert result.listings[0].url == "https://linkedin.com/jobs/view/123"
+        assert result.listings[0].published_at == "2024-01-15"
+        expected_id = hashlib.sha256(b"https://linkedin.com/jobs/view/123").hexdigest()[:16]
+        assert result.listings[0].external_id == expected_id
+        assert result.listings[1].is_remote is True
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_collect_missing_token(self):
+        profile = Profile(
+            name="Test",
+            search_terms=["python"],
+            sources={"linkedin": SourceConfig(enabled=True, apify_token="")},
+        )
+        collector = LinkedInCollector()
+        result = await collector.collect(profile)
+        assert len(result.errors) == 1
+        assert "token" in result.errors[0].lower()
+        assert result.listings == []
+
+    @pytest.mark.asyncio
+    async def test_collect_disabled(self):
+        profile = Profile(
+            name="Test",
+            sources={"linkedin": SourceConfig(enabled=False)},
+        )
+        collector = LinkedInCollector()
+        result = await collector.collect(profile)
+        assert result.listings == []
+        assert result.errors == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_http_error(self, linkedin_profile):
+        respx.post(
+            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(500))
+
+        collector = LinkedInCollector()
+        result = await collector.collect(linkedin_profile)
+
+        assert len(result.errors) == 1
+        assert "LinkedIn Apify error" in result.errors[0]
+        assert result.listings == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_actor_timeout(self, linkedin_profile):
+        respx.post(
+            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        # Always return RUNNING status
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("RUNNING"))
+        )
+
+        collector = LinkedInCollector()
+        # Patch sleep and timeout to avoid waiting 5 min in test
+        with patch("jobhaul.collectors.linkedin.POLL_INTERVAL", 0), \
+             patch("jobhaul.collectors.linkedin.TIMEOUT", 0):
+            result = await collector.collect(linkedin_profile)
+
+        assert len(result.errors) == 1
+        assert "timed out" in result.errors[0].lower()
+        assert result.listings == []
+
+
+# --- Indeed Apify tests ---
+
+
+class TestIndeed:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_success(self, indeed_profile):
+        respx.post(
+            "https://api.apify.com/v2/acts/apify~indeed-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED"))
+        )
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=INDEED_ITEMS))
+
+        collector = IndeedCollector()
+        result = await collector.collect(indeed_profile)
+
+        assert result.source == "indeed"
+        assert len(result.listings) == 1
+        assert result.listings[0].title == "Backend Engineer"
+        assert result.listings[0].company == "TechCo"
+        assert result.listings[0].url == "https://indeed.com/viewjob?jk=abc123"
+        assert result.listings[0].published_at == "2024-02-01"
+        expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
+        assert result.listings[0].external_id == expected_id
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_collect_missing_token(self):
+        profile = Profile(
+            name="Test",
+            search_terms=["python"],
+            sources={"indeed": SourceConfig(enabled=True, apify_token="")},
+        )
+        collector = IndeedCollector()
+        result = await collector.collect(profile)
+        assert len(result.errors) == 1
+        assert "token" in result.errors[0].lower()
+        assert result.listings == []
+
+    @pytest.mark.asyncio
+    async def test_collect_disabled(self):
+        profile = Profile(
+            name="Test",
+            sources={"indeed": SourceConfig(enabled=False)},
+        )
+        collector = IndeedCollector()
+        result = await collector.collect(profile)
+        assert result.listings == []
+        assert result.errors == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_http_error(self, indeed_profile):
+        respx.post(
+            "https://api.apify.com/v2/acts/apify~indeed-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(500))
+
+        collector = IndeedCollector()
+        result = await collector.collect(indeed_profile)
+
+        assert len(result.errors) == 1
+        assert "Indeed Apify error" in result.errors[0]
         assert result.listings == []
