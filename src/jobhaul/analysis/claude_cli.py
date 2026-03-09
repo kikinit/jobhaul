@@ -14,9 +14,23 @@ logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT = 90
 
+# Strings in stderr that indicate a rate limit or overload condition
+_RATE_LIMIT_MARKERS = [
+    "rate limit",
+    "rate_limit",
+    "429",
+    "overloaded",
+    "529",
+    "too many requests",
+]
+
 
 class LLMTimeoutError(RuntimeError):
     """Raised when the LLM subprocess exceeds its timeout."""
+
+
+class LLMRateLimitError(RuntimeError):
+    """Raised when the LLM returns a rate limit or overload error."""
 
 
 def _refresh_claude_token() -> None:
@@ -61,6 +75,8 @@ class ClaudeCliAdapter(LLMAdapter):
 
             if proc.returncode != 0:
                 err_msg = stderr.decode().strip()
+                if any(marker in err_msg.lower() for marker in _RATE_LIMIT_MARKERS):
+                    raise LLMRateLimitError(f"claude CLI rate limited (exit {proc.returncode}): {err_msg}")
                 raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err_msg}")
 
             return stdout.decode().strip()

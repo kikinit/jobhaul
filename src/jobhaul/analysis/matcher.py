@@ -8,7 +8,7 @@ import json
 import re
 
 from jobhaul.analysis.adapter import LLMAdapter
-from jobhaul.analysis.claude_cli import LLMTimeoutError
+from jobhaul.analysis.claude_cli import LLMRateLimitError, LLMTimeoutError
 from jobhaul.log import get_logger
 from jobhaul.models import AnalysisResult, JobListing, Profile
 
@@ -21,6 +21,7 @@ RETRY_PROMPT = (
 
 MAX_RETRIES = 2
 BACKOFF_DELAYS = [5, 15]
+RATE_LIMIT_DELAY = 60  # seconds to wait on rate limit before retrying
 
 
 def compute_profile_hash(profile: Profile) -> str:
@@ -180,6 +181,26 @@ async def analyze_listing(
         try:
             raw_response = await adapter.analyze(prompt)
             break
+        except LLMRateLimitError as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                logger.warning(
+                    "LLM rate limited for listing %d (attempt %d/%d): %s — waiting %ds",
+                    listing.id, attempt + 1, 1 + MAX_RETRIES, e, RATE_LIMIT_DELAY,
+                )
+                await asyncio.sleep(RATE_LIMIT_DELAY)
+            else:
+                logger.error(
+                    "LLM rate limited for listing %d after %d attempts: %s",
+                    listing.id, 1 + MAX_RETRIES, e,
+                )
+                return AnalysisResult(
+                    listing_id=listing.id,
+                    match_score=0,
+                    summary=f"Analysis failed: {e}",
+                    analysis_error=str(e),
+                    profile_hash=profile_hash,
+                )
         except (LLMTimeoutError, RuntimeError) as e:
             last_error = e
             if attempt < MAX_RETRIES:
