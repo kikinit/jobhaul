@@ -14,7 +14,7 @@ from jobhaul.models import CollectorResult, Profile, RawListing
 
 logger = get_logger(__name__)
 
-ACTOR_ID = "fetchclub~linkedin-jobs-scraper"
+ACTOR_ID = "curious_coder~linkedin-jobs-scraper"
 APIFY_RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
 APIFY_DATASET_URL = "https://api.apify.com/v2/datasets"
 POLL_INTERVAL = 10
@@ -63,11 +63,16 @@ class LinkedInCollector(Collector):
         search_terms: list[str],
         location: str,
     ) -> tuple[str, str]:
-        body = {
-            "searchTerms": [f"{term} {location}" for term in search_terms],
-            "location": location,
-            "maxResults": 50,
-        }
+        start_urls = []
+        for term in search_terms:
+            params = (
+                f"keywords={term}&location={location}"
+                "&f_TPR=r604800&f_JT=F&f_E=1,2"
+            )
+            start_urls.append(
+                {"url": f"https://www.linkedin.com/jobs/search/?{params}"}
+            )
+        body = {"startUrls": start_urls, "maxItems": 50}
         resp = await client.post(
             f"{APIFY_RUN_URL}?token={token}", json=body
         )
@@ -104,10 +109,13 @@ class LinkedInCollector(Collector):
         listings: list[RawListing] = []
         seen: set[str] = set()
         for item in items:
-            job_url = item.get("jobUrl") or ""
+            job_url = item.get("link") or ""
             if not job_url:
                 continue
-            ext_id = hashlib.sha256(job_url.encode()).hexdigest()[:16]
+            ext_id = item.get("id") or hashlib.sha256(
+                job_url.encode()
+            ).hexdigest()[:16]
+            ext_id = str(ext_id)
             if ext_id in seen:
                 continue
             seen.add(ext_id)
@@ -119,7 +127,7 @@ class LinkedInCollector(Collector):
                     title=title,
                     company=item.get("companyName"),
                     location=location,
-                    description=item.get("description"),
+                    description=item.get("descriptionText"),
                     url=job_url,
                     published_at=item.get("publishedAt"),
                     is_remote=detect_remote(title, location),

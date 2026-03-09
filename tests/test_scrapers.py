@@ -58,11 +58,12 @@ class TestLinkedInCollector:
         collector = LinkedInCollector()
         items = [
             {
+                "id": "123",
                 "title": "Python Dev",
                 "companyName": "Acme Corp",
                 "location": "Stockholm",
-                "description": "Build stuff",
-                "jobUrl": "https://linkedin.com/jobs/view/123",
+                "descriptionText": "Build stuff",
+                "link": "https://www.linkedin.com/jobs/view/123",
                 "publishedAt": "2024-01-15",
             },
         ]
@@ -72,16 +73,15 @@ class TestLinkedInCollector:
         assert listings[0].company == "Acme Corp"
         assert listings[0].location == "Stockholm"
         assert listings[0].source == "linkedin"
-        expected_id = hashlib.sha256(b"https://linkedin.com/jobs/view/123").hexdigest()[:16]
-        assert listings[0].external_id == expected_id
+        assert listings[0].external_id == "123"
 
     def test_map_results_dedup(self):
         from jobhaul.collectors.linkedin import LinkedInCollector
 
         collector = LinkedInCollector()
         items = [
-            {"title": "Dev", "jobUrl": "https://linkedin.com/jobs/view/123"},
-            {"title": "Dev", "jobUrl": "https://linkedin.com/jobs/view/123"},
+            {"id": "123", "title": "Dev", "link": "https://www.linkedin.com/jobs/view/123"},
+            {"id": "123", "title": "Dev", "link": "https://www.linkedin.com/jobs/view/123"},
         ]
         listings = collector._map_results(items)
         assert len(listings) == 1
@@ -100,9 +100,10 @@ class TestLinkedInCollector:
         collector = LinkedInCollector()
         items = [
             {
+                "id": "789",
                 "title": "Remote Python Dev",
                 "location": "Remote",
-                "jobUrl": "https://linkedin.com/jobs/view/789",
+                "link": "https://www.linkedin.com/jobs/view/789",
             },
         ]
         listings = collector._map_results(items)
@@ -187,4 +188,4 @@ class TestIndeedCollector:
     def test_linkedin_actor_id(self):
         from jobhaul.collectors.linkedin import ACTOR_ID
 
-        assert ACTOR_ID == "fetchclub~linkedin-jobs-scraper"
+        assert ACTOR_ID == "curious_coder~linkedin-jobs-scraper"

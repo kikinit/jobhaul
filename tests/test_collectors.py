@@ -304,19 +304,21 @@ def _apify_status_response(status="SUCCEEDED"):
 
 LINKEDIN_ITEMS = [
     {
+        "id": "123",
         "title": "Python Developer",
         "companyName": "Acme Corp",
         "location": "Stockholm, Sweden",
-        "description": "Build Python apps",
-        "jobUrl": "https://linkedin.com/jobs/view/123",
+        "descriptionText": "Build Python apps",
+        "link": "https://www.linkedin.com/jobs/view/123",
         "publishedAt": "2024-01-15",
     },
     {
+        "id": "456",
         "title": "Remote React Dev",
         "companyName": "Remote Inc",
         "location": "Remote",
-        "description": "Build React apps",
-        "jobUrl": "https://linkedin.com/jobs/view/456",
+        "descriptionText": "Build React apps",
+        "link": "https://www.linkedin.com/jobs/view/456",
         "publishedAt": "2024-01-16",
     },
 ]
@@ -339,7 +341,7 @@ class TestLinkedIn:
     async def test_collect_success(self, linkedin_profile):
         # Mock start run
         respx.post(
-            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            "https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/runs",
             params={"token": "test-token"},
         ).mock(
             return_value=httpx.Response(200, json=_apify_run_response())
@@ -365,10 +367,9 @@ class TestLinkedIn:
         assert result.listings[0].title == "Python Developer"
         assert result.listings[0].company == "Acme Corp"
         assert result.listings[0].location == "Stockholm, Sweden"
-        assert result.listings[0].url == "https://linkedin.com/jobs/view/123"
+        assert result.listings[0].url == "https://www.linkedin.com/jobs/view/123"
         assert result.listings[0].published_at == "2024-01-15"
-        expected_id = hashlib.sha256(b"https://linkedin.com/jobs/view/123").hexdigest()[:16]
-        assert result.listings[0].external_id == expected_id
+        assert result.listings[0].external_id == "123"
         assert result.listings[1].is_remote is True
         assert result.errors == []
 
@@ -400,7 +401,7 @@ class TestLinkedIn:
     @pytest.mark.asyncio
     async def test_collect_http_error(self, linkedin_profile):
         respx.post(
-            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            "https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/runs",
             params={"token": "test-token"},
         ).mock(return_value=httpx.Response(500))
 
@@ -415,7 +416,7 @@ class TestLinkedIn:
     @pytest.mark.asyncio
     async def test_collect_actor_timeout(self, linkedin_profile):
         respx.post(
-            "https://api.apify.com/v2/acts/fetchclub~linkedin-jobs-scraper/runs",
+            "https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/runs",
             params={"token": "test-token"},
         ).mock(
             return_value=httpx.Response(200, json=_apify_run_response())
