@@ -14,6 +14,7 @@ class SourceConfig(BaseModel):
     enabled: bool = False
     api_key: str = ""
     region: str = ""
+    apify_token: str = ""
 
 
 class LLMConfig(BaseModel):

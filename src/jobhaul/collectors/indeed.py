@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 
-from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
+from jobhaul.collectors.base import Collector, detect_remote
 from jobhaul.collectors.registry import register
 from jobhaul.collectors.stealth import (
     CircuitBreaker,
     RequestCounter,
-    apply_stealth,
     create_stealth_context,
     random_delay,
 )
@@ -22,7 +20,6 @@ logger = get_logger(__name__)
 BASE_URL_TEMPLATE = "https://{country}.indeed.com/jobs"
 MAX_PAGES = 3
 RESULTS_PER_PAGE = 10  # Indeed shows ~15 per page, pagination uses increments of 10
-COLLECTOR_TIMEOUT = 120  # seconds — abort entire collector if exceeded
 
 
 @register
@@ -42,19 +39,6 @@ class IndeedCollector(Collector):
                 errors=["Playwright not installed. Run: pip install playwright && playwright install chromium"],
             )
 
-        try:
-            return await asyncio.wait_for(self._collect_inner(profile), timeout=COLLECTOR_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning("Indeed: collector timed out after %ds", COLLECTOR_TIMEOUT)
-            return CollectorResult(
-                source=self.name,
-                errors=[f"Indeed collector timed out after {COLLECTOR_TIMEOUT}s"],
-            )
-
-    async def _collect_inner(self, profile: Profile) -> CollectorResult:
-        from playwright.async_api import async_playwright
-
-        source_config = profile.sources.get("indeed")
         scraping = profile.scraping
         country = source_config.region or "se"
         base_url = BASE_URL_TEMPLATE.format(country=country)
@@ -63,7 +47,6 @@ class IndeedCollector(Collector):
         seen_ids: set[str] = set()
         circuit_breaker = CircuitBreaker()
         request_counter = RequestCounter(scraping.max_requests_per_run)
-        rate_limit_hits = 0
 
         try:
             async with async_playwright() as p:
@@ -80,16 +63,10 @@ class IndeedCollector(Collector):
                         logger.warning(msg)
                         errors.append(msg)
                         break
-                    if rate_limit_hits >= 3:
-                        msg = "Indeed: rate limited 3 times, aborting to preserve quota"
-                        logger.warning(msg)
-                        errors.append(msg)
-                        break
 
                     # New context per search term for session isolation
                     context = await create_stealth_context(browser, scraping)
                     page = await context.new_page()
-                    await apply_stealth(page)
 
                     try:
                         term_listings = await self._search_term(
