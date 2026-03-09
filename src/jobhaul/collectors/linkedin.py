@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
@@ -21,6 +22,7 @@ logger = get_logger(__name__)
 SEARCH_URL = "https://www.linkedin.com/jobs/search/"
 MAX_PAGES = 3
 RESULTS_PER_PAGE = 25
+COLLECTOR_TIMEOUT = 120  # seconds — abort entire collector if exceeded
 
 
 @register
@@ -39,6 +41,18 @@ class LinkedInCollector(Collector):
                 source=self.name,
                 errors=["Playwright not installed. Run: pip install playwright && playwright install chromium"],
             )
+
+        try:
+            return await asyncio.wait_for(self._collect_inner(profile), timeout=COLLECTOR_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("LinkedIn: collector timed out after %ds", COLLECTOR_TIMEOUT)
+            return CollectorResult(
+                source=self.name,
+                errors=[f"LinkedIn collector timed out after {COLLECTOR_TIMEOUT}s"],
+            )
+
+    async def _collect_inner(self, profile: Profile) -> CollectorResult:
+        from playwright.async_api import async_playwright
 
         scraping = profile.scraping
         listings: list[RawListing] = []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
@@ -21,6 +22,7 @@ logger = get_logger(__name__)
 BASE_URL_TEMPLATE = "https://{country}.indeed.com/jobs"
 MAX_PAGES = 3
 RESULTS_PER_PAGE = 10  # Indeed shows ~15 per page, pagination uses increments of 10
+COLLECTOR_TIMEOUT = 120  # seconds — abort entire collector if exceeded
 
 
 @register
@@ -40,6 +42,19 @@ class IndeedCollector(Collector):
                 errors=["Playwright not installed. Run: pip install playwright && playwright install chromium"],
             )
 
+        try:
+            return await asyncio.wait_for(self._collect_inner(profile), timeout=COLLECTOR_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("Indeed: collector timed out after %ds", COLLECTOR_TIMEOUT)
+            return CollectorResult(
+                source=self.name,
+                errors=[f"Indeed collector timed out after {COLLECTOR_TIMEOUT}s"],
+            )
+
+    async def _collect_inner(self, profile: Profile) -> CollectorResult:
+        from playwright.async_api import async_playwright
+
+        source_config = profile.sources.get("indeed")
         scraping = profile.scraping
         country = source_config.region or "se"
         base_url = BASE_URL_TEMPLATE.format(country=country)
