@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 
 from jobhaul.analysis.adapter import LLMAdapter
+from jobhaul.analysis.claude_cli import LLMTimeoutError
 from jobhaul.log import get_logger
 from jobhaul.models import AnalysisResult, JobListing, Profile
 
@@ -16,6 +18,9 @@ RETRY_PROMPT = (
     "Your previous response was not valid JSON. "
     "Please respond with ONLY a JSON object, nothing else."
 )
+
+MAX_RETRIES = 2
+BACKOFF_DELAYS = [5, 15]
 
 
 def compute_profile_hash(profile: Profile) -> str:
@@ -159,12 +164,43 @@ def pre_screen(listing: JobListing, profile: Profile) -> float:
 async def analyze_listing(
     listing: JobListing, profile: Profile, adapter: LLMAdapter
 ) -> AnalysisResult:
-    """Analyze a single listing against the profile using the LLM adapter."""
+    """Analyze a single listing against the profile using the LLM adapter.
+
+    Retries up to MAX_RETRIES times on timeout or transient errors with
+    exponential backoff. On total failure returns a zero-score result with
+    analysis_error set so the scan can continue.
+    """
     profile_hash = compute_profile_hash(profile)
     prompt = build_prompt(listing, profile)
 
     logger.info("Analyzing listing %d: %s", listing.id, listing.title)
-    raw_response = await adapter.analyze(prompt)
+
+    last_error: Exception | None = None
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            raw_response = await adapter.analyze(prompt)
+            break
+        except (LLMTimeoutError, RuntimeError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                delay = BACKOFF_DELAYS[attempt]
+                logger.warning(
+                    "LLM call failed for listing %d (attempt %d/%d): %s — retrying in %ds",
+                    listing.id, attempt + 1, 1 + MAX_RETRIES, e, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "LLM call failed for listing %d after %d attempts: %s",
+                    listing.id, 1 + MAX_RETRIES, e,
+                )
+                return AnalysisResult(
+                    listing_id=listing.id,
+                    match_score=0,
+                    summary=f"Analysis failed: {e}",
+                    analysis_error=str(e),
+                    profile_hash=profile_hash,
+                )
 
     try:
         data = parse_llm_response(raw_response)

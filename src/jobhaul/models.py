@@ -109,6 +109,7 @@ class AnalysisResult(BaseModel):
     concerns: list[str] = Field(default_factory=list)
     summary: str | None = None
     application_notes: str | None = None
+    analysis_error: str | None = None
     profile_hash: str = ""
     analyzed_at: str = ""
 

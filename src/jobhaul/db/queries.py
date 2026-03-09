@@ -227,8 +227,8 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
     cursor = conn.execute(
         """INSERT INTO analyses
            (listing_id, match_score, match_reasons, missing_skills, strengths,
-            concerns, summary, application_notes, profile_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            concerns, summary, application_notes, analysis_error, profile_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(listing_id, profile_hash) DO UPDATE SET
                match_score=excluded.match_score,
                match_reasons=excluded.match_reasons,
@@ -237,6 +237,7 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
                concerns=excluded.concerns,
                summary=excluded.summary,
                application_notes=excluded.application_notes,
+               analysis_error=excluded.analysis_error,
                analyzed_at=datetime('now')""",
         (
             result.listing_id,
@@ -247,6 +248,7 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
             _serialize_list(result.concerns),
             result.summary,
             result.application_notes,
+            result.analysis_error,
             result.profile_hash,
         ),
     )
@@ -271,6 +273,7 @@ def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | 
         concerns=_deserialize_list(row["concerns"]),
         summary=row["summary"],
         application_notes=row["application_notes"],
+        analysis_error=row["analysis_error"],
         profile_hash=row["profile_hash"],
         analyzed_at=row["analyzed_at"],
     )

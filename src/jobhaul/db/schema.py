@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     concerns TEXT,
     summary TEXT,
     application_notes TEXT,
+    analysis_error TEXT,
     profile_hash TEXT NOT NULL,
     analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(listing_id, profile_hash)

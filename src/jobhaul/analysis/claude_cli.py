@@ -12,7 +12,11 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
-TIMEOUT = 60
+DEFAULT_TIMEOUT = 90
+
+
+class LLMTimeoutError(RuntimeError):
+    """Raised when the LLM subprocess exceeds its timeout."""
 
 
 def _refresh_claude_token() -> None:
@@ -35,8 +39,9 @@ def _refresh_claude_token() -> None:
 
 
 class ClaudeCliAdapter(LLMAdapter):
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, model: str = "claude-sonnet-4-20250514", timeout: int = DEFAULT_TIMEOUT):
         self.model = model
+        self.timeout = timeout
         _refresh_claude_token()
 
     async def analyze(self, prompt: str) -> str:
@@ -51,7 +56,7 @@ class ClaudeCliAdapter(LLMAdapter):
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode()), timeout=TIMEOUT
+                proc.communicate(input=prompt.encode()), timeout=self.timeout
             )
 
             if proc.returncode != 0:
@@ -62,7 +67,7 @@ class ClaudeCliAdapter(LLMAdapter):
 
         except asyncio.TimeoutError:
             proc.kill()
-            raise RuntimeError(f"claude CLI timed out after {TIMEOUT}s")
+            raise LLMTimeoutError(f"claude CLI timed out after {self.timeout}s")
         except FileNotFoundError:
             raise RuntimeError(
                 "claude CLI not found. Install it or configure a different LLM adapter."

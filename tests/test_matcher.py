@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from jobhaul.analysis.adapter import LLMAdapter
+from jobhaul.analysis.claude_cli import LLMTimeoutError
 from jobhaul.analysis.matcher import (
     analyze_listing,
     build_prompt,
@@ -40,6 +42,32 @@ class RetryMockAdapter(LLMAdapter):
         idx = min(self.call_count, len(self.responses) - 1)
         self.call_count += 1
         return self.responses[idx]
+
+
+class TimeoutThenSuccessAdapter(LLMAdapter):
+    """Raises LLMTimeoutError on first N calls, then returns valid JSON."""
+
+    def __init__(self, fail_count: int, success_response: str):
+        self.fail_count = fail_count
+        self.success_response = success_response
+        self.call_count = 0
+
+    async def analyze(self, prompt: str) -> str:
+        self.call_count += 1
+        if self.call_count <= self.fail_count:
+            raise LLMTimeoutError(f"claude CLI timed out after 90s")
+        return self.success_response
+
+
+class AlwaysTimeoutAdapter(LLMAdapter):
+    """Always raises LLMTimeoutError."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def analyze(self, prompt: str) -> str:
+        self.call_count += 1
+        raise LLMTimeoutError("claude CLI timed out after 90s")
 
 
 @pytest.fixture
@@ -329,3 +357,84 @@ class TestAnalyzeListing:
         assert adapter.call_count == 2
         assert result.match_score == 0
         assert "failed" in result.summary.lower()
+
+
+class TestTimeoutRetry:
+    """Issue #15: LLM timeout and retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_then_success_on_retry(self, listing, profile):
+        """Timeout on first call, succeed on second → valid result."""
+        valid_response = json.dumps({"match_score": 72, "summary": "Good match"})
+        adapter = TimeoutThenSuccessAdapter(fail_count=1, success_response=valid_response)
+
+        with patch("jobhaul.analysis.matcher.asyncio.sleep", new_callable=AsyncMock):
+            result = await analyze_listing(listing, profile, adapter)
+
+        assert adapter.call_count == 2
+        assert result.match_score == 72
+        assert result.analysis_error is None
+
+    @pytest.mark.asyncio
+    async def test_always_timeout_returns_zero_score(self, listing, profile):
+        """All retries timeout → score=0 with analysis_error set, does NOT raise."""
+        adapter = AlwaysTimeoutAdapter()
+
+        with patch("jobhaul.analysis.matcher.asyncio.sleep", new_callable=AsyncMock):
+            result = await analyze_listing(listing, profile, adapter)
+
+        assert adapter.call_count == 3  # 1 initial + 2 retries
+        assert result.match_score == 0
+        assert result.analysis_error is not None
+        assert "timed out" in result.analysis_error
+        assert result.profile_hash == compute_profile_hash(profile)
+
+    @pytest.mark.asyncio
+    async def test_timeout_twice_then_success(self, listing, profile):
+        """Timeout on first two calls, succeed on third → valid result."""
+        valid_response = json.dumps({"match_score": 65, "summary": "Decent fit"})
+        adapter = TimeoutThenSuccessAdapter(fail_count=2, success_response=valid_response)
+
+        with patch("jobhaul.analysis.matcher.asyncio.sleep", new_callable=AsyncMock):
+            result = await analyze_listing(listing, profile, adapter)
+
+        assert adapter.call_count == 3
+        assert result.match_score == 65
+        assert result.analysis_error is None
+
+    @pytest.mark.asyncio
+    async def test_scan_continues_after_failed_listing(self, listing, profile):
+        """A failed listing must not propagate an exception — scan continues."""
+        adapter = AlwaysTimeoutAdapter()
+
+        with patch("jobhaul.analysis.matcher.asyncio.sleep", new_callable=AsyncMock):
+            # This must NOT raise
+            result = await analyze_listing(listing, profile, adapter)
+
+        assert result.listing_id == listing.id
+        assert result.match_score == 0
+        assert result.analysis_error is not None
+
+        # Simulate scan continuing with a second listing
+        listing2 = JobListing(
+            id=2,
+            title="JS Developer",
+            company="Beta Inc",
+            sources=["jooble"],
+            created_at="2024-01-02",
+        )
+        good_adapter = MockAdapter(json.dumps({"match_score": 80, "summary": "Great"}))
+        result2 = await analyze_listing(listing2, profile, good_adapter)
+        assert result2.match_score == 80
+
+    @pytest.mark.asyncio
+    async def test_backoff_delays_are_applied(self, listing, profile):
+        """Verify exponential backoff delays between retries."""
+        adapter = AlwaysTimeoutAdapter()
+
+        with patch("jobhaul.analysis.matcher.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await analyze_listing(listing, profile, adapter)
+
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_any_call(5)
+        mock_sleep.assert_any_call(15)
