@@ -83,11 +83,18 @@ def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
 
     if existing_id:
         listing_id = existing_id
+        # Update deadline and status if provided on an existing listing
+        if raw.application_deadline:
+            conn.execute(
+                "UPDATE listings SET application_deadline = ? WHERE id = ?",
+                (raw.application_deadline, listing_id),
+            )
     else:
         cursor = conn.execute(
             """INSERT INTO listings (title, company, location, description, url,
-               published_at, is_remote, employment_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               published_at, is_remote, employment_type,
+               application_deadline, listing_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 raw.title,
                 raw.company,
@@ -97,6 +104,8 @@ def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
                 raw.published_at,
                 int(raw.is_remote),
                 raw.employment_type,
+                raw.application_deadline,
+                raw.listing_status,
             ),
         )
         listing_id = cursor.lastrowid
@@ -109,6 +118,12 @@ def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
     )
     conn.commit()
     return listing_id
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    return column in cols
 
 
 def get_listing(conn: sqlite3.Connection, listing_id: int) -> JobListing | None:
@@ -124,6 +139,7 @@ def get_listing(conn: sqlite3.Connection, listing_id: int) -> JobListing | None:
         ).fetchall()
     ]
 
+    row_keys = row.keys()
     return JobListing(
         id=row["id"],
         title=row["title"],
@@ -136,6 +152,8 @@ def get_listing(conn: sqlite3.Connection, listing_id: int) -> JobListing | None:
         employment_type=row["employment_type"],
         sources=sources,
         created_at=row["created_at"],
+        application_deadline=row["application_deadline"] if "application_deadline" in row_keys else None,
+        listing_status=row["listing_status"] if "listing_status" in row_keys else "active",
     )
 
 
@@ -147,8 +165,11 @@ def list_listings(
     min_score: int | None = None,
     limit: int | None = None,
     sort_by_score: bool = False,
+    include_expired: bool = False,
 ) -> list[JobListing]:
     """List listings with optional filters."""
+    has_status = _has_column(conn, "listings", "listing_status")
+
     query = """
         SELECT DISTINCT l.* FROM listings l
         LEFT JOIN listing_sources ls ON l.id = ls.listing_id
@@ -156,6 +177,9 @@ def list_listings(
         WHERE l.created_at >= datetime('now', ?)
     """
     params: list = [f"-{days} days"]
+
+    if has_status and not include_expired:
+        query += " AND COALESCE(l.listing_status, 'active') = 'active'"
 
     if source:
         query += " AND ls.source = ?"
@@ -176,6 +200,7 @@ def list_listings(
         params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
+    row_keys = rows[0].keys() if rows else []
     listings = []
     for row in rows:
         sources = [
@@ -197,9 +222,29 @@ def list_listings(
                 employment_type=row["employment_type"],
                 sources=sources,
                 created_at=row["created_at"],
+                application_deadline=row["application_deadline"] if "application_deadline" in row_keys else None,
+                listing_status=row["listing_status"] if "listing_status" in row_keys else "active",
             )
         )
     return listings
+
+
+def mark_likely_expired(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Mark a listing as likely expired."""
+    conn.execute(
+        "UPDATE listings SET listing_status = 'likely_expired' WHERE id = ?",
+        (listing_id,),
+    )
+    conn.commit()
+
+
+def mark_confirmed_expired(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Mark a listing as confirmed expired."""
+    conn.execute(
+        "UPDATE listings SET listing_status = 'confirmed_expired' WHERE id = ?",
+        (listing_id,),
+    )
+    conn.commit()
 
 
 def _serialize_list(value: list[str]) -> str | None:
@@ -322,6 +367,7 @@ def get_unanalyzed_listings(
         params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
+    row_keys = rows[0].keys() if rows else []
     listings = []
     for row in rows:
         sources = [
@@ -343,6 +389,8 @@ def get_unanalyzed_listings(
                 employment_type=row["employment_type"],
                 sources=sources,
                 created_at=row["created_at"],
+                application_deadline=row["application_deadline"] if "application_deadline" in row_keys else None,
+                listing_status=row["listing_status"] if "listing_status" in row_keys else "active",
             )
         )
     return listings
@@ -368,6 +416,7 @@ def get_failed_listings(
         params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
+    row_keys = rows[0].keys() if rows else []
     listings = []
     for row in rows:
         sources = [
@@ -389,6 +438,8 @@ def get_failed_listings(
                 employment_type=row["employment_type"],
                 sources=sources,
                 created_at=row["created_at"],
+                application_deadline=row["application_deadline"] if "application_deadline" in row_keys else None,
+                listing_status=row["listing_status"] if "listing_status" in row_keys else "active",
             )
         )
     return listings

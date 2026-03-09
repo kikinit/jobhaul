@@ -76,6 +76,7 @@ async def listings_page(
     days: str | None = Query("30"),
     sort: str = Query("date"),
     page: int = Query(1, ge=1),
+    include_expired: bool = Query(False),
 ):
     parsed_min_score = _parse_optional_int(min_score)
     parsed_days = _parse_optional_int(days) or 30
@@ -86,6 +87,7 @@ async def listings_page(
         all_listings = list_listings(
             conn, days=parsed_days, source=source, min_score=parsed_min_score,
             sort_by_score=(sort == "score"),
+            include_expired=include_expired,
         )
 
         listings_with_analysis = []
@@ -124,6 +126,7 @@ async def listings_page(
         "remote_only": remote_only,
         "days": parsed_days,
         "sort": sort,
+        "include_expired": include_expired,
     })
 
 
@@ -307,6 +310,7 @@ async def api_listings(
     remote_only: bool = Query(False),
     days: str | None = Query("30"),
     limit: str | None = Query(None),
+    include_expired: bool = Query(False),
 ):
     parsed_min_score = _parse_optional_int(min_score)
     parsed_days = _parse_optional_int(days) or 30
@@ -314,7 +318,10 @@ async def api_listings(
 
     conn = _get_db()
     try:
-        all_listings = list_listings(conn, days=parsed_days, source=source, min_score=parsed_min_score)
+        all_listings = list_listings(
+            conn, days=parsed_days, source=source, min_score=parsed_min_score,
+            include_expired=include_expired,
+        )
         results = []
         for listing in all_listings:
             if remote_only and not listing.is_remote:

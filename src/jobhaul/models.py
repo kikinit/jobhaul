@@ -82,6 +82,8 @@ class JobListing(BaseModel):
     employment_type: str | None = None
     sources: list[str] = Field(default_factory=list)
     created_at: str = ""
+    application_deadline: str | None = None
+    listing_status: str = "active"
 
 
 class RawListing(BaseModel):
@@ -98,6 +100,8 @@ class RawListing(BaseModel):
     source: str = ""
     external_id: str = ""
     source_url: str | None = None
+    application_deadline: str | None = None
+    listing_status: str = "active"
 
 
 class AnalysisResult(BaseModel):

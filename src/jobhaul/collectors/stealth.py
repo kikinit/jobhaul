@@ -31,6 +31,10 @@ def get_random_user_agent() -> str:
     return random.choice(USER_AGENTS)
 
 
+# Alias for the interface requested in Issue #5
+random_user_agent = get_random_user_agent
+
+
 def get_random_viewport() -> dict:
     """Return a random viewport size within reasonable bounds."""
     return {
@@ -39,10 +43,39 @@ def get_random_viewport() -> dict:
     }
 
 
-async def random_delay(min_s: float, max_s: float) -> None:
+async def random_delay(min_s: float = 2.0, max_s: float = 5.0) -> None:
     """Sleep for a random duration between min_s and max_s seconds."""
     delay = random.uniform(min_s, max_s)
     await asyncio.sleep(delay)
+
+
+_MANUAL_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+window.chrome = {runtime: {}};
+"""
+
+
+async def apply_stealth(page) -> None:
+    """Apply stealth patches to a Playwright page.
+
+    Uses playwright-stealth if available, otherwise falls back to manual
+    init-script patches (removing navigator.webdriver, etc.).
+    """
+    try:
+        from playwright_stealth import stealth_async
+
+        await stealth_async(page)
+        logger.debug("Applied playwright-stealth patches to page")
+    except ImportError:
+        try:
+            await page.add_init_script(_MANUAL_STEALTH_JS)
+            logger.debug("Applied manual stealth patches to page")
+        except Exception as e:
+            logger.warning("Failed to apply manual stealth patches: %s", e)
+    except Exception as e:
+        logger.warning("Failed to apply playwright-stealth patches: %s", e)
 
 
 async def create_stealth_context(browser, scraping_config=None):

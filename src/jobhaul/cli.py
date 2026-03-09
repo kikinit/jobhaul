@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 
 import typer
@@ -88,6 +89,8 @@ async def _scan(
         conn.close()
         return
 
+    collected_external_ids: set[str] = set()
+
     if not analyze_only:
         # Import collectors to trigger registration
         import jobhaul.collectors.jooble  # noqa: F401
@@ -131,6 +134,7 @@ async def _scan(
                     skipped_excluded += 1
                     continue
                 upsert_listing(conn, raw)
+                collected_external_ids.add(raw.external_id)
             total_collected += len(result.listings) - skipped_excluded
 
             if result.errors:
@@ -142,6 +146,9 @@ async def _scan(
         console.print(f"\n[green]Total: {total_collected} listings collected[/green]")
         if skipped_excluded:
             console.print(f"[dim]Skipped {skipped_excluded} excluded listings[/dim]")
+
+        # Expiry check: mark listings with past deadline not seen in this scan
+        _check_expiry(conn, collected_external_ids)
 
     if not skip_analysis:
         from jobhaul.analysis.claude_cli import ClaudeCliAdapter
@@ -197,6 +204,37 @@ async def _scan(
                 console.print(f"  [red]Error analyzing {listing.title}: {e}[/red]")
 
     conn.close()
+
+
+def _check_expiry(conn, collected_external_ids: set[str]) -> None:
+    """Mark listings as likely_expired if deadline is past and not seen in scan."""
+    from jobhaul.db.queries import mark_likely_expired
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """SELECT l.id, l.title, l.application_deadline
+           FROM listings l
+           WHERE l.listing_status = 'active'
+             AND l.application_deadline IS NOT NULL
+             AND l.application_deadline < ?""",
+        (now,),
+    ).fetchall()
+
+    # Filter to those not seen in latest scan
+    marked = 0
+    for row in rows:
+        # Check if this listing has any source with an external_id in the collected set
+        source_ids = conn.execute(
+            "SELECT external_id FROM listing_sources WHERE listing_id = ?",
+            (row["id"],),
+        ).fetchall()
+        seen = any(r["external_id"] in collected_external_ids for r in source_ids)
+        if not seen:
+            mark_likely_expired(conn, row["id"])
+            marked += 1
+
+    if marked:
+        console.print(f"[dim]Marked {marked} listing(s) as likely expired[/dim]")
 
 
 @app.command("list")

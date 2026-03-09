@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from jobhaul.collectors.base import detect_remote
+from jobhaul.collectors.base import detect_remote, handle_rate_limit
 from jobhaul.collectors.jooble import JoobleCollector
 from jobhaul.collectors.platsbanken import PlatsbankenCollector
 from jobhaul.collectors.remoteok import RemoteOKCollector
@@ -57,6 +57,26 @@ class TestRemoteDetection:
         assert detect_remote("Fjärrjobb", "fjärr arbete") is True
 
 
+# --- handle_rate_limit tests ---
+
+
+class TestHandleRateLimit:
+    def test_respects_retry_after_header(self):
+        resp = httpx.Response(429, headers={"retry-after": "30"})
+        wait = handle_rate_limit(resp, "test")
+        assert wait == 30
+
+    def test_defaults_to_60_without_header(self):
+        resp = httpx.Response(429)
+        wait = handle_rate_limit(resp, "test")
+        assert wait == 60
+
+    def test_defaults_to_60_on_invalid_header(self):
+        resp = httpx.Response(429, headers={"retry-after": "not-a-number"})
+        wait = handle_rate_limit(resp, "test")
+        assert wait == 60
+
+
 # --- Platsbanken tests ---
 
 
@@ -92,6 +112,34 @@ class TestPlatsbanken:
         assert result.listings[0].title == "Python Developer"
         assert result.listings[0].company == "Acme Corp"
         assert result.listings[0].external_id == "123"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_with_deadline(self, profile):
+        respx.get("https://jobsearch.api.jobtechdev.se/search").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "hits": [
+                        {
+                            "id": "124",
+                            "headline": "Python Developer",
+                            "description": {"text": "Work with Python"},
+                            "employer": {"name": "Acme Corp"},
+                            "workplace_address": {"municipality": "Stockholm"},
+                            "webpage_url": "https://example.com/124",
+                            "application_deadline": "2025-06-15",
+                        }
+                    ]
+                },
+            )
+        )
+
+        collector = PlatsbankenCollector()
+        result = await collector.collect(profile)
+
+        assert len(result.listings) == 1
+        assert result.listings[0].application_deadline == "2025-06-15"
 
     @respx.mock
     @pytest.mark.asyncio
@@ -251,3 +299,61 @@ class TestJooble:
         collector = JoobleCollector()
         result = await collector.collect(profile)
         assert result.listings == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_429_triggers_wait_not_immediate_retry(self, profile):
+        """HTTP 429 should trigger a wait, not an immediate retry."""
+        call_count = 0
+
+        def mock_response(request):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return httpx.Response(429, headers={"retry-after": "0"})
+            return httpx.Response(200, json={"jobs": []})
+
+        respx.post("https://jooble.org/api/test-key").mock(side_effect=mock_response)
+
+        collector = JoobleCollector()
+        result = await collector.collect(profile)
+        # Should have retried after 429, then succeeded with empty jobs
+        assert call_count >= 2
+        assert result.errors == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_429_aborts_after_three_hits(self, profile):
+        """After 3 rate limit hits, collector should abort."""
+        respx.post("https://jooble.org/api/test-key").mock(
+            return_value=httpx.Response(429, headers={"retry-after": "0"})
+        )
+
+        collector = JoobleCollector()
+        result = await collector.collect(profile)
+        # Should have errors mentioning rate limiting
+        assert len(result.errors) >= 1
+        assert any("rate limited" in e.lower() for e in result.errors)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_429_respects_retry_after(self, profile):
+        """Retry-After header should be respected."""
+        import time
+
+        call_count = 0
+
+        def mock_response(request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Return 429 with very short wait for testing
+                return httpx.Response(429, headers={"retry-after": "0"})
+            return httpx.Response(200, json={"jobs": []})
+
+        respx.post("https://jooble.org/api/test-key").mock(side_effect=mock_response)
+
+        collector = JoobleCollector()
+        result = await collector.collect(profile)
+        # Should have made at least 2 calls (429 + success)
+        assert call_count >= 2

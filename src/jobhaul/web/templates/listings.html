@@ -31,6 +31,10 @@
             <input type="checkbox" name="remote_only" {% if remote_only %}checked{% endif %}>
             Remote only
         </label>
+        <label>
+            <input type="checkbox" name="include_expired" {% if include_expired %}checked{% endif %}>
+            Include expired
+        </label>
         <button type="submit">Filter</button>
     </div>
 </form>
@@ -45,6 +49,7 @@
             <th>Remote</th>
             <th>Sources</th>
             <th>Score</th>
+            <th>Status</th>
         </tr>
     </thead>
     <tbody>
@@ -68,6 +73,16 @@
                     —
                 {% endif %}
             </td>
+            <td>
+                {% if item.listing.listing_status == "likely_expired" %}
+                    &#128336;
+                {% elif item.listing.listing_status == "confirmed_expired" %}
+                    &#10060;
+                {% endif %}
+                {% if item.listing.application_deadline %}
+                    <small>{{ item.listing.application_deadline }}</small>
+                {% endif %}
+            </td>
         </tr>
     {% endfor %}
     </tbody>
@@ -77,11 +92,11 @@
 <nav>
     <ul>
         {% if page > 1 %}
-        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&page={{ page - 1 }}">Previous</a></li>
+        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&include_expired={{ include_expired }}&page={{ page - 1 }}">Previous</a></li>
         {% endif %}
         <li>Page {{ page }} of {{ total_pages }}</li>
         {% if page < total_pages %}
-        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&page={{ page + 1 }}">Next</a></li>
+        <li><a href="?source={{ source }}&min_score={{ min_score or '' }}&remote_only={{ remote_only }}&days={{ days }}&sort={{ sort }}&include_expired={{ include_expired }}&page={{ page + 1 }}">Next</a></li>
         {% endif %}
     </ul>
 </nav>

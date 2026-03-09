@@ -527,3 +527,125 @@ class TestAnalysisErrorBadges:
         assert resp.status_code == 200
         # Warning badge should show for analysis with error
         assert "&#9888;" in resp.text or "\u26a0" in resp.text
+
+
+# --- Deadline / Expired status tests (Issue #14) ---
+
+
+class TestDeadlineDisplay:
+    def test_listings_page_shows_deadline(self, client, db):
+        """Listings page shows application_deadline when set."""
+        upsert_listing(
+            db,
+            RawListing(
+                title="Deadline Job",
+                company="DeadlineCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-deadline-1",
+                application_deadline="2025-06-15",
+            ),
+        )
+        resp = client.get("/listings?include_expired=true")
+        assert resp.status_code == 200
+        assert "2025-06-15" in resp.text
+
+    def test_detail_shows_deadline(self, client, db):
+        """Detail page shows application_deadline."""
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Deadline Detail Job",
+                company="DeadlineCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-deadline-2",
+                application_deadline="2025-12-31",
+            ),
+        )
+        resp = client.get(f"/listings/{listing_id}")
+        assert resp.status_code == 200
+        assert "2025-12-31" in resp.text
+        assert "Application Deadline" in resp.text
+
+    def test_expired_filter_excludes_by_default(self, client, db):
+        """Default filter should only show active listings."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        id1 = upsert_listing(
+            db,
+            RawListing(
+                title="Active Job",
+                company="ActiveCo",
+                description="Active",
+                source="platsbanken",
+                external_id="ext-active-1",
+            ),
+        )
+        id2 = upsert_listing(
+            db,
+            RawListing(
+                title="Expired Job",
+                company="ExpiredCo",
+                description="Expired",
+                source="platsbanken",
+                external_id="ext-expired-1",
+            ),
+        )
+        mark_likely_expired(db, id2)
+
+        resp = client.get("/listings")
+        assert resp.status_code == 200
+        assert "Active Job" in resp.text
+        assert "Expired Job" not in resp.text
+
+    def test_expired_filter_includes_when_checked(self, client, db):
+        """Include expired checkbox shows expired listings."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        id1 = upsert_listing(
+            db,
+            RawListing(
+                title="Active Job 2",
+                company="ActiveCo",
+                description="Active",
+                source="platsbanken",
+                external_id="ext-active-2",
+            ),
+        )
+        id2 = upsert_listing(
+            db,
+            RawListing(
+                title="Expired Job 2",
+                company="ExpiredCo",
+                description="Expired",
+                source="platsbanken",
+                external_id="ext-expired-2",
+            ),
+        )
+        mark_likely_expired(db, id2)
+
+        resp = client.get("/listings?include_expired=true")
+        assert resp.status_code == 200
+        assert "Expired Job 2" in resp.text
+
+    def test_detail_shows_status_badge_expired(self, client, db):
+        """Detail page shows status badge for expired listings."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        listing_id = upsert_listing(
+            db,
+            RawListing(
+                title="Status Badge Job",
+                company="BadgeCo",
+                description="Test",
+                source="platsbanken",
+                external_id="ext-badge-1",
+            ),
+        )
+        mark_likely_expired(db, listing_id)
+
+        resp = client.get(f"/listings/{listing_id}")
+        assert resp.status_code == 200
+        # Should show clock emoji for likely_expired (&#128336; = 🕐)
+        assert "Likely Expired" in resp.text

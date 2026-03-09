@@ -6,7 +6,7 @@ import asyncio
 
 import httpx
 
-from jobhaul.collectors.base import Collector, detect_remote
+from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
 from jobhaul.collectors.registry import register
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
@@ -85,6 +85,9 @@ class PlatsbankenCollector(Collector):
                 workplace = hit.get("workplace_address", {})
                 location = workplace.get("municipality") or workplace.get("region")
 
+                # Parse application deadline
+                deadline = hit.get("application_deadline") or hit.get("last_application_date")
+
                 listings.append(
                     RawListing(
                         title=title,
@@ -98,6 +101,7 @@ class PlatsbankenCollector(Collector):
                         source=self.name,
                         external_id=ext_id,
                         source_url=hit.get("webpage_url"),
+                        application_deadline=deadline,
                     )
                 )
 

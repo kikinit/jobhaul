@@ -554,7 +554,7 @@ class TestMigrations:
 
         # Version should be bumped
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 3
+        assert version == SCHEMA_VERSION
         conn.close()
 
     def test_migrate_v1_adds_fail_count(self, tmp_path):
@@ -583,7 +583,7 @@ class TestMigrations:
         assert cols.count("fail_count") == 1
 
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 3
+        assert version == SCHEMA_VERSION
         conn.close()
 
     def test_save_analysis_after_migration_error_none(self, tmp_path):
@@ -707,7 +707,7 @@ class TestMigrateV2ToV3:
         assert "fail_count" in cols
 
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 3
+        assert version == SCHEMA_VERSION
         conn.close()
 
 
@@ -836,3 +836,167 @@ class TestRetryFailedAnalyses:
             ))
         failed = get_failed_listings(conn, "h1")
         assert len(failed) == 0
+
+
+# -- Deadline tracking tests (Issue #14) ----------------------------------------
+
+
+class TestDeadlineTracking:
+    """Test application_deadline and listing_status columns."""
+
+    def test_upsert_stores_deadline(self, conn, sample_listing):
+        """upsert_listing() should store application_deadline correctly."""
+        listing_with_deadline = sample_listing.model_copy(
+            update={"application_deadline": "2025-06-15"}
+        )
+        listing_id = upsert_listing(conn, listing_with_deadline)
+        listing = get_listing(conn, listing_id)
+        assert listing.application_deadline == "2025-06-15"
+
+    def test_upsert_stores_status(self, conn, sample_listing):
+        """upsert_listing() should store listing_status correctly."""
+        listing_with_status = sample_listing.model_copy(
+            update={"listing_status": "active"}
+        )
+        listing_id = upsert_listing(conn, listing_with_status)
+        listing = get_listing(conn, listing_id)
+        assert listing.listing_status == "active"
+
+    def test_mark_likely_expired(self, conn, sample_listing):
+        """mark_likely_expired() should update status."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        listing_id = upsert_listing(conn, sample_listing)
+        mark_likely_expired(conn, listing_id)
+        listing = get_listing(conn, listing_id)
+        assert listing.listing_status == "likely_expired"
+
+    def test_mark_confirmed_expired(self, conn, sample_listing):
+        """mark_confirmed_expired() should update status."""
+        from jobhaul.db.queries import mark_confirmed_expired
+
+        listing_id = upsert_listing(conn, sample_listing)
+        mark_confirmed_expired(conn, listing_id)
+        listing = get_listing(conn, listing_id)
+        assert listing.listing_status == "confirmed_expired"
+
+    def test_list_excludes_expired_by_default(self, conn, sample_listing):
+        """list_listings() should exclude expired by default."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        id1 = upsert_listing(conn, sample_listing)
+        id2 = upsert_listing(conn, sample_listing.model_copy(
+            update={"title": "Active Job", "external_id": "ext-active"}
+        ))
+        mark_likely_expired(conn, id1)
+
+        listings = list_listings(conn)
+        assert len(listings) == 1
+        assert listings[0].id == id2
+
+    def test_list_includes_expired_when_requested(self, conn, sample_listing):
+        """list_listings(include_expired=True) should include expired."""
+        from jobhaul.db.queries import mark_likely_expired
+
+        id1 = upsert_listing(conn, sample_listing)
+        id2 = upsert_listing(conn, sample_listing.model_copy(
+            update={"title": "Active Job", "external_id": "ext-active"}
+        ))
+        mark_likely_expired(conn, id1)
+
+        listings = list_listings(conn, include_expired=True)
+        assert len(listings) == 2
+
+    def test_deadline_none_by_default(self, conn, sample_listing):
+        """Listings without deadline should have None."""
+        listing_id = upsert_listing(conn, sample_listing)
+        listing = get_listing(conn, listing_id)
+        assert listing.application_deadline is None
+
+    def test_default_status_is_active(self, conn, sample_listing):
+        """Default listing_status should be 'active'."""
+        listing_id = upsert_listing(conn, sample_listing)
+        listing = get_listing(conn, listing_id)
+        assert listing.listing_status == "active"
+
+
+# V3 schema: analyses with analysis_error and fail_count, but listings WITHOUT deadline columns
+V3_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS listings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    description TEXT,
+    url TEXT,
+    published_at TEXT,
+    is_remote INTEGER DEFAULT 0,
+    employment_type TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS listing_sources (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    source_url TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    match_score INTEGER NOT NULL,
+    match_reasons TEXT,
+    missing_skills TEXT,
+    strengths TEXT,
+    concerns TEXT,
+    summary TEXT,
+    application_notes TEXT,
+    analysis_error TEXT,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    profile_hash TEXT NOT NULL,
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(listing_id, profile_hash)
+);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def _make_v3_db(db_path: str) -> sqlite3.Connection:
+    """Create a DB with V3 schema (no deadline columns)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(V3_SCHEMA_SQL)
+    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+    conn.commit()
+    return conn
+
+
+class TestMigrateV3ToV5:
+    """Test v3 -> v5 migration adds deadline columns."""
+
+    def test_migrate_v3_adds_deadline_columns(self, tmp_path):
+        db_path = str(tmp_path / "v3.db")
+        conn = _make_v3_db(db_path)
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(listings)").fetchall()]
+        assert "application_deadline" not in cols
+        assert "listing_status" not in cols
+
+        run_migrations(conn)
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(listings)").fetchall()]
+        assert "application_deadline" in cols
+        assert "listing_status" in cols
+
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == 5
+        conn.close()

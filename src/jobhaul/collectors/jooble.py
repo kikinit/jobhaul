@@ -6,7 +6,7 @@ import asyncio
 
 import httpx
 
-from jobhaul.collectors.base import Collector, detect_remote
+from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
 from jobhaul.collectors.registry import register
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
@@ -96,15 +96,34 @@ class JoobleCollector(Collector):
     async def _request_with_retry(
         self, client: httpx.AsyncClient, url: str, body: dict, retries: int = 3
     ) -> httpx.Response:
-        for attempt in range(retries):
+        rate_limit_hits = 0
+        attempt = 0
+        while attempt < retries:
             try:
                 resp = await client.post(url, json=body)
+                if resp.status_code == 429:
+                    rate_limit_hits += 1
+                    if rate_limit_hits >= 3:
+                        raise RuntimeError(
+                            "Jooble: rate limited 3 times, aborting to preserve quota"
+                        )
+                    wait = handle_rate_limit(resp, "Jooble")
+                    await asyncio.sleep(wait)
+                    continue  # Don't count toward normal retries
                 resp.raise_for_status()
                 return resp
-            except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            except httpx.HTTPStatusError as e:
                 if attempt == retries - 1:
                     raise
                 wait = 2**attempt
                 logger.warning("Jooble retry %d after error: %s", attempt + 1, e)
                 await asyncio.sleep(wait)
+                attempt += 1
+            except httpx.TransportError as e:
+                if attempt == retries - 1:
+                    raise
+                wait = 2**attempt
+                logger.warning("Jooble retry %d after error: %s", attempt + 1, e)
+                await asyncio.sleep(wait)
+                attempt += 1
         raise RuntimeError("Unreachable")
