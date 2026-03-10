@@ -416,7 +416,7 @@ class TestLinkedIn:
         assert result.listings[0].seniority_level == "Mid-Senior level"
         assert result.listings[0].employment_type == "Full-time"
         assert result.listings[0].salary == "50000-70000 SEK/month"
-        # Second item has no new fields -> None
+        # Second item has no new fields → None
         assert result.listings[1].seniority_level is None
         assert result.listings[1].employment_type is None
         assert result.listings[1].salary is None
@@ -522,9 +522,9 @@ class TestLinkedIn:
 
         collector = LinkedInCollector()
         # Patch sleep and timeout to avoid waiting 5 min in test
-        with patch("jobhaul.collectors.linkedin.POLL_INTERVAL", 0), \
-             patch("jobhaul.collectors.linkedin.TIMEOUT", 0):
-            result = await collector.collect(linkedin_profile)
+        collector.POLL_INTERVAL = 0
+        collector.TIMEOUT = 0
+        result = await collector.collect(linkedin_profile)
 
         assert len(result.errors) == 1
         assert "timed out" in result.errors[0].lower()
@@ -559,7 +559,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_success_field_mapping(self, indeed_profile):
-        """Success case -- verify all output fields are mapped correctly."""
+        """Success case — verify all output fields are mapped correctly."""
         self._mock_indeed_run()
         respx.get(
             "https://api.apify.com/v2/datasets/ds-1/items",
@@ -573,7 +573,7 @@ class TestIndeed:
         assert len(result.listings) == 2
         assert result.errors == []
 
-        # First item -- full field mapping
+        # First item — full field mapping
         l0 = result.listings[0]
         assert l0.title == "Backend Engineer"
         assert l0.company == "TechCo"
@@ -586,7 +586,7 @@ class TestIndeed:
         expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
         assert l0.external_id == expected_id
 
-        # Second item -- remote detection and different fields
+        # Second item — remote detection and different fields
         l1 = result.listings[1]
         assert l1.title == "Remote Frontend Dev"
         assert l1.is_remote is True
@@ -622,7 +622,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_http_error(self, indeed_profile):
-        """HTTP error on run start -- collector returns error, no crash."""
+        """HTTP error on run start — collector returns error, no crash."""
         respx.post(
             "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
             params={"token": "test-token"},
@@ -638,7 +638,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_actor_run_failed(self, indeed_profile):
-        """Actor run FAILED status -- collector returns error."""
+        """Actor run FAILED status — collector returns error."""
         respx.post(
             "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
             params={"token": "test-token"},
@@ -662,7 +662,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_actor_timeout(self, indeed_profile):
-        """Actor run timeout -- poll never succeeds, returns TimeoutError."""
+        """Actor run timeout — poll never succeeds, returns TimeoutError."""
         respx.post(
             "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
             params={"token": "test-token"},
@@ -677,9 +677,9 @@ class TestIndeed:
         )
 
         collector = IndeedCollector()
-        with patch("jobhaul.collectors.indeed.POLL_INTERVAL", 0), \
-             patch("jobhaul.collectors.indeed.TIMEOUT", 0):
-            result = await collector.collect(indeed_profile)
+        collector.POLL_INTERVAL = 0
+        collector.TIMEOUT = 0
+        result = await collector.collect(indeed_profile)
 
         assert len(result.errors) == 1
         assert "timed out" in result.errors[0].lower()
@@ -688,7 +688,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_deduplication_across_terms(self):
-        """Two search terms return overlapping results -- only unique listings kept."""
+        """Two search terms return overlapping results — only unique listings kept."""
         profile = Profile(
             name="Test",
             search_terms=["python", "backend"],
@@ -733,7 +733,7 @@ class TestIndeed:
             "https://api.apify.com/v2/actor-runs/run-b",
             params={"token": "test-token"},
         ).mock(return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED")))
-        # Dataset routes -- shared_item appears in both
+        # Dataset routes — shared_item appears in both
         respx.get(
             "https://api.apify.com/v2/datasets/ds-a/items",
             params={"token": "test-token"},
@@ -755,7 +755,7 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_empty_results(self, indeed_profile):
-        """Actor returns 0 items -- collector returns empty listings, no crash."""
+        """Actor returns 0 items — collector returns empty listings, no crash."""
         self._mock_indeed_run()
         respx.get(
             "https://api.apify.com/v2/datasets/ds-1/items",

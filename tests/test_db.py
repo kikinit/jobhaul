@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from jobhaul.db.queries import (
+    _compute_dedup_key,
     _normalize_for_dedup,
     find_duplicate,
     get_analysis,
@@ -978,6 +979,55 @@ def _make_v3_db(db_path: str) -> sqlite3.Connection:
     conn.execute("INSERT INTO schema_version (version) VALUES (3)")
     conn.commit()
     return conn
+
+
+class TestComputeDedupKey:
+    """Test _compute_dedup_key() correctness."""
+
+    def test_deterministic(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("Python Developer", "Acme Corp")
+        assert key1 == key2
+
+    def test_case_insensitive(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("PYTHON DEVELOPER", "ACME CORP")
+        assert key1 == key2
+
+    def test_whitespace_insensitive(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("  Python  Developer  ", "  Acme  Corp  ")
+        assert key1 == key2
+
+    def test_non_breaking_space(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("Python\u00a0Developer", "Acme\u00a0Corp")
+        assert key1 == key2
+
+    def test_different_titles_differ(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("JavaScript Developer", "Acme Corp")
+        assert key1 != key2
+
+    def test_different_companies_differ(self):
+        key1 = _compute_dedup_key("Python Developer", "Acme Corp")
+        key2 = _compute_dedup_key("Python Developer", "Beta Inc")
+        assert key1 != key2
+
+    def test_none_company(self):
+        key1 = _compute_dedup_key("Python Developer", None)
+        key2 = _compute_dedup_key("Python Developer", None)
+        assert key1 == key2
+
+    def test_none_vs_empty_company(self):
+        key1 = _compute_dedup_key("Python Developer", None)
+        key2 = _compute_dedup_key("Python Developer", "")
+        assert key1 == key2
+
+    def test_returns_hex_string(self):
+        key = _compute_dedup_key("Test", "Co")
+        assert len(key) == 64  # SHA-256 hex digest
+        assert all(c in "0123456789abcdef" for c in key)
 
 
 class TestMigrateV3ToV5:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,10 +28,14 @@ def db(tmp_path):
 
 @pytest.fixture
 def client(db):
-    from jobhaul.web.app import app
+    from jobhaul.web.app import app, get_db_dep
 
-    with patch("jobhaul.web.app._get_db", return_value=db):
-        yield TestClient(app)
+    def override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db_dep] = override_get_db
+    yield TestClient(app)
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

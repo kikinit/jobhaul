@@ -8,7 +8,7 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 MIGRATIONS = {
     2: "ALTER TABLE analyses ADD COLUMN analysis_error TEXT",
@@ -17,6 +17,7 @@ MIGRATIONS = {
     5: "ALTER TABLE listings ADD COLUMN listing_status TEXT DEFAULT 'active'",
     6: "ALTER TABLE listings ADD COLUMN seniority_level TEXT",
     7: "ALTER TABLE listings ADD COLUMN salary TEXT",
+    8: "ALTER TABLE listings ADD COLUMN dedup_key TEXT",
 }
 
 SCHEMA_SQL = """
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS listings (
     salary TEXT,
     application_deadline TEXT,
     listing_status TEXT DEFAULT 'active',
+    dedup_key TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -66,6 +68,9 @@ CREATE TABLE IF NOT EXISTS analyses (
 CREATE INDEX IF NOT EXISTS idx_listings_title_company
     ON listings(title, company);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_dedup_key
+    ON listings(dedup_key) WHERE dedup_key IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_listing_sources_listing_id
     ON listing_sources(listing_id);
 
@@ -93,6 +98,29 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             conn.commit()
             logger.info("Applied DB migration to version %d", version)
 
+            # Backfill dedup_key for existing rows after v8 migration
+            if version == 8:
+                _backfill_dedup_keys(conn)
+
+
+def _backfill_dedup_keys(conn: sqlite3.Connection) -> None:
+    """Populate dedup_key for existing rows that lack it."""
+    from jobhaul.db.queries import _compute_dedup_key
+
+    rows = conn.execute("SELECT id, title, company FROM listings WHERE dedup_key IS NULL").fetchall()
+    for row in rows:
+        key = _compute_dedup_key(row["title"], row["company"])
+        conn.execute("UPDATE listings SET dedup_key = ? WHERE id = ?", (key, row["id"]))
+    if rows:
+        conn.commit()
+        logger.info("Backfilled dedup_key for %d existing rows", len(rows))
+    # Create the unique index if it doesn't exist (for migrated DBs)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_dedup_key
+        ON listings(dedup_key) WHERE dedup_key IS NOT NULL
+    """)
+    conn.commit()
+
 
 def init_db(db_path: str) -> sqlite3.Connection:
     """Initialize the database and return a connection."""
@@ -112,13 +140,6 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.commit()
 
     run_migrations(conn)
-
-    # Merge any existing duplicates that slipped through with old normalization
-    from jobhaul.db.queries import merge_existing_duplicates
-
-    merged = merge_existing_duplicates(conn)
-    if merged:
-        logger.info("Merged %d existing duplicate(s)", merged)
 
     logger.info("Database initialized at %s", db_path)
     return conn
