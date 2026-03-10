@@ -330,10 +330,22 @@ INDEED_ITEMS = [
     {
         "positionName": "Backend Engineer",
         "company": "TechCo",
-        "location": "Gothenburg",
+        "formattedLocation": "Gothenburg",
         "description": "Work on backend systems",
-        "url": "https://indeed.com/viewjob?jk=abc123",
-        "datePosted": "2024-02-01",
+        "link": "https://indeed.com/viewjob?jk=abc123",
+        "pubDate": "2026-03-09",
+        "salary": "30 000 kr/mån",
+        "jobTypes": ["Full-time", "Permanent"],
+    },
+    {
+        "positionName": "Remote Frontend Dev",
+        "company": "WebCorp",
+        "formattedLocation": "Remote",
+        "description": "Build UIs",
+        "link": "https://indeed.com/viewjob?jk=def456",
+        "pubDate": "2026-03-08",
+        "salary": None,
+        "jobTypes": ["Contract"],
     },
 ]
 
@@ -523,21 +535,32 @@ class TestLinkedIn:
 
 
 class TestIndeed:
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_collect_success(self, indeed_profile):
+    """Tests for Indeed collector using misceres~indeed-scraper Apify actor."""
+
+    def _mock_indeed_run(self, run_id="run-1", dataset_id="ds-1"):
+        """Set up mocks for a successful Indeed actor run."""
         respx.post(
-            "https://api.apify.com/v2/acts/apify~indeed-scraper/runs",
+            "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
             params={"token": "test-token"},
         ).mock(
-            return_value=httpx.Response(200, json=_apify_run_response())
+            return_value=httpx.Response(
+                200, json=_apify_run_response(run_id, dataset_id)
+            )
         )
         respx.get(
-            "https://api.apify.com/v2/actor-runs/run-1",
+            "https://api.apify.com/v2/actor-runs/" + run_id,
             params={"token": "test-token"},
         ).mock(
-            return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED"))
+            return_value=httpx.Response(
+                200, json=_apify_status_response("SUCCEEDED")
+            )
         )
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_success_field_mapping(self, indeed_profile):
+        """Success case -- verify all output fields are mapped correctly."""
+        self._mock_indeed_run()
         respx.get(
             "https://api.apify.com/v2/datasets/ds-1/items",
             params={"token": "test-token"},
@@ -547,17 +570,32 @@ class TestIndeed:
         result = await collector.collect(indeed_profile)
 
         assert result.source == "indeed"
-        assert len(result.listings) == 1
-        assert result.listings[0].title == "Backend Engineer"
-        assert result.listings[0].company == "TechCo"
-        assert result.listings[0].url == "https://indeed.com/viewjob?jk=abc123"
-        assert result.listings[0].published_at == "2024-02-01"
-        expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
-        assert result.listings[0].external_id == expected_id
+        assert len(result.listings) == 2
         assert result.errors == []
+
+        # First item -- full field mapping
+        l0 = result.listings[0]
+        assert l0.title == "Backend Engineer"
+        assert l0.company == "TechCo"
+        assert l0.location == "Gothenburg"
+        assert l0.description == "Work on backend systems"
+        assert l0.url == "https://indeed.com/viewjob?jk=abc123"
+        assert l0.published_at == "2026-03-09"
+        assert l0.salary == "30 000 kr/mån"
+        assert l0.employment_type == "Full-time"
+        expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
+        assert l0.external_id == expected_id
+
+        # Second item -- remote detection and different fields
+        l1 = result.listings[1]
+        assert l1.title == "Remote Frontend Dev"
+        assert l1.is_remote is True
+        assert l1.salary is None
+        assert l1.employment_type == "Contract"
 
     @pytest.mark.asyncio
     async def test_collect_missing_token(self):
+        """Missing token returns empty CollectorResult with error message."""
         profile = Profile(
             name="Test",
             search_terms=["python"],
@@ -571,6 +609,7 @@ class TestIndeed:
 
     @pytest.mark.asyncio
     async def test_collect_disabled(self):
+        """Disabled source returns empty CollectorResult, no API calls."""
         profile = Profile(
             name="Test",
             sources={"indeed": SourceConfig(enabled=False)},
@@ -583,8 +622,9 @@ class TestIndeed:
     @respx.mock
     @pytest.mark.asyncio
     async def test_collect_http_error(self, indeed_profile):
+        """HTTP error on run start -- collector returns error, no crash."""
         respx.post(
-            "https://api.apify.com/v2/acts/apify~indeed-scraper/runs",
+            "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
             params={"token": "test-token"},
         ).mock(return_value=httpx.Response(500))
 
@@ -594,3 +634,166 @@ class TestIndeed:
         assert len(result.errors) == 1
         assert "Indeed Apify error" in result.errors[0]
         assert result.listings == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_actor_run_failed(self, indeed_profile):
+        """Actor run FAILED status -- collector returns error."""
+        respx.post(
+            "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("FAILED"))
+        )
+
+        collector = IndeedCollector()
+        result = await collector.collect(indeed_profile)
+
+        assert len(result.errors) == 1
+        assert "FAILED" in result.errors[0]
+        assert result.listings == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_actor_timeout(self, indeed_profile):
+        """Actor run timeout -- poll never succeeds, returns TimeoutError."""
+        respx.post(
+            "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("RUNNING"))
+        )
+
+        collector = IndeedCollector()
+        with patch("jobhaul.collectors.indeed.POLL_INTERVAL", 0), \
+             patch("jobhaul.collectors.indeed.TIMEOUT", 0):
+            result = await collector.collect(indeed_profile)
+
+        assert len(result.errors) == 1
+        assert "timed out" in result.errors[0].lower()
+        assert result.listings == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_deduplication_across_terms(self):
+        """Two search terms return overlapping results -- only unique listings kept."""
+        profile = Profile(
+            name="Test",
+            search_terms=["python", "backend"],
+            skills=["Python"],
+            location="Sweden",
+            sources={
+                "indeed": SourceConfig(enabled=True, apify_token="test-token", region="SE"),
+            },
+        )
+        shared_item = {
+            "positionName": "Python Dev",
+            "company": "Overlap Corp",
+            "formattedLocation": "Stockholm",
+            "description": "Overlapping job",
+            "link": "https://indeed.com/viewjob?jk=same123",
+            "pubDate": "2026-03-09",
+        }
+        unique_item = {
+            "positionName": "Backend Dev",
+            "company": "Unique Corp",
+            "formattedLocation": "Malmö",
+            "description": "Unique job",
+            "link": "https://indeed.com/viewjob?jk=unique456",
+            "pubDate": "2026-03-08",
+        }
+
+        # Both search terms trigger separate runs
+        run_route = respx.post(
+            "https://api.apify.com/v2/acts/misceres~indeed-scraper/runs",
+            params={"token": "test-token"},
+        )
+        run_route.side_effect = [
+            httpx.Response(200, json=_apify_run_response("run-a", "ds-a")),
+            httpx.Response(200, json=_apify_run_response("run-b", "ds-b")),
+        ]
+        # Poll routes
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-a",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED")))
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-b",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED")))
+        # Dataset routes -- shared_item appears in both
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-a/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=[shared_item, unique_item]))
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-b/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=[shared_item]))
+
+        collector = IndeedCollector()
+        result = await collector.collect(profile)
+
+        # shared_item appears twice in combined items but should be deduplicated
+        assert len(result.listings) == 2
+        urls = {l.url for l in result.listings}
+        assert "https://indeed.com/viewjob?jk=same123" in urls
+        assert "https://indeed.com/viewjob?jk=unique456" in urls
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_empty_results(self, indeed_profile):
+        """Actor returns 0 items -- collector returns empty listings, no crash."""
+        self._mock_indeed_run()
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=[]))
+
+        collector = IndeedCollector()
+        result = await collector.collect(indeed_profile)
+
+        assert result.listings == []
+        assert result.errors == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_missing_fields_skips_gracefully(self, indeed_profile):
+        """Items missing link are skipped; missing optional fields handled."""
+        items = [
+            {
+                "positionName": "No Link Job",
+                "company": "Ghost Corp",
+            },
+            {
+                "link": "https://indeed.com/viewjob?jk=valid",
+            },
+        ]
+        self._mock_indeed_run()
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=items))
+
+        collector = IndeedCollector()
+        result = await collector.collect(indeed_profile)
+
+        # First item skipped (no link), second kept with defaults
+        assert len(result.listings) == 1
+        assert result.listings[0].url == "https://indeed.com/viewjob?jk=valid"
+        assert result.listings[0].title == ""
+        assert result.listings[0].company is None
+        assert result.listings[0].location == ""
+        assert result.listings[0].description is None

@@ -147,16 +147,22 @@ class TestIndeedCollector:
             {
                 "positionName": "Backend Dev",
                 "company": "TechCo",
-                "location": "Stockholm",
+                "formattedLocation": "Stockholm",
                 "description": "Build APIs",
-                "url": "https://indeed.com/viewjob?jk=abc123",
-                "datePosted": "2024-02-01",
+                "link": "https://indeed.com/viewjob?jk=abc123",
+                "pubDate": "2024-02-01",
+                "salary": "30 000 kr/mån",
+                "jobTypes": ["Full-time"],
             },
         ]
         listings = collector._map_results(items)
         assert len(listings) == 1
         assert listings[0].title == "Backend Dev"
         assert listings[0].company == "TechCo"
+        assert listings[0].location == "Stockholm"
+        assert listings[0].published_at == "2024-02-01"
+        assert listings[0].salary == "30 000 kr/mån"
+        assert listings[0].employment_type == "Full-time"
         assert listings[0].source == "indeed"
         expected_id = hashlib.sha256(b"https://indeed.com/viewjob?jk=abc123").hexdigest()[:16]
         assert listings[0].external_id == expected_id
@@ -166,8 +172,8 @@ class TestIndeedCollector:
 
         collector = IndeedCollector()
         items = [
-            {"positionName": "Dev", "url": "https://indeed.com/viewjob?jk=abc"},
-            {"positionName": "Dev", "url": "https://indeed.com/viewjob?jk=abc"},
+            {"positionName": "Dev", "link": "https://indeed.com/viewjob?jk=abc"},
+            {"positionName": "Dev", "link": "https://indeed.com/viewjob?jk=abc"},
         ]
         listings = collector._map_results(items)
         assert len(listings) == 1
@@ -183,7 +189,7 @@ class TestIndeedCollector:
     def test_actor_id(self):
         from jobhaul.collectors.indeed import ACTOR_ID
 
-        assert ACTOR_ID == "apify~indeed-scraper"
+        assert ACTOR_ID == "misceres~indeed-scraper"
 
     def test_linkedin_actor_id(self):
         from jobhaul.collectors.linkedin import ACTOR_ID

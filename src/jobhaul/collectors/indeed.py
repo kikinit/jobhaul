@@ -14,7 +14,7 @@ from jobhaul.models import CollectorResult, Profile, RawListing
 
 logger = get_logger(__name__)
 
-ACTOR_ID = "apify~indeed-scraper"
+ACTOR_ID = "misceres~indeed-scraper"
 APIFY_RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
 APIFY_DATASET_URL = "https://api.apify.com/v2/datasets"
 POLL_INTERVAL = 10
@@ -37,24 +37,25 @@ class IndeedCollector(Collector):
                 errors=["Indeed Apify token not configured"],
             )
 
-        listings: list[RawListing] = []
+        all_items: list[dict] = []
         errors: list[str] = []
         country = (source_config.region or "SE").upper()
-        position = profile.search_terms[0] if profile.search_terms else ""
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                run_id, dataset_id = await self._start_run(
-                    client, token, position, profile.location, country
-                )
-                await self._poll_until_done(client, token, run_id)
-                items = await self._fetch_results(client, token, dataset_id)
-                listings = self._map_results(items)
-            except Exception as e:
-                msg = f"Indeed Apify error: {e}"
-                logger.warning(msg)
-                errors.append(msg)
+            for term in profile.search_terms:
+                try:
+                    run_id, dataset_id = await self._start_run(
+                        client, token, term, profile.location, country
+                    )
+                    await self._poll_until_done(client, token, run_id)
+                    items = await self._fetch_results(client, token, dataset_id)
+                    all_items.extend(items)
+                except Exception as e:
+                    msg = f"Indeed Apify error: {e}"
+                    logger.warning(msg)
+                    errors.append(msg)
 
+        listings = self._map_results(all_items)
         logger.info("Indeed: collected %d listings", len(listings))
         return CollectorResult(source=self.name, listings=listings, errors=errors)
 
@@ -69,8 +70,8 @@ class IndeedCollector(Collector):
         body = {
             "position": position,
             "location": location,
-            "maxItems": 50,
             "country": country,
+            "maxItems": 50,
         }
         resp = await client.post(
             f"{APIFY_RUN_URL}?token={token}", json=body
@@ -108,7 +109,7 @@ class IndeedCollector(Collector):
         listings: list[RawListing] = []
         seen: set[str] = set()
         for item in items:
-            url = item.get("url") or ""
+            url = item.get("link") or ""
             if not url:
                 continue
             ext_id = hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -117,15 +118,17 @@ class IndeedCollector(Collector):
             seen.add(ext_id)
 
             title = item.get("positionName") or ""
-            location = item.get("location") or ""
+            location = item.get("formattedLocation") or ""
             listings.append(
                 RawListing(
                     title=title,
                     company=item.get("company"),
                     location=location,
-                    description=item.get("description"),
+                    description=item.get("description") or None,
                     url=url,
-                    published_at=item.get("datePosted"),
+                    published_at=item.get("pubDate"),
+                    salary=item.get("salary"),
+                    employment_type=(item.get("jobTypes") or [None])[0],
                     is_remote=detect_remote(title, location),
                     source=self.name,
                     external_id=ext_id,
