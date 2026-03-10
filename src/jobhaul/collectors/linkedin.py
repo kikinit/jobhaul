@@ -70,7 +70,7 @@ class LinkedInCollector(Collector):
                 "&f_TPR=r604800&f_JT=F&f_E=1,2"
             )
             start_urls.append(
-                {"url": f"https://www.linkedin.com/jobs/search/?{params}"}
+                f"https://www.linkedin.com/jobs/search/?{params}"
             )
         body = {"urls": start_urls, "maxItems": 50}
         resp = await client.post(
