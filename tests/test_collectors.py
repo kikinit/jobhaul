@@ -310,7 +310,10 @@ LINKEDIN_ITEMS = [
         "location": "Stockholm, Sweden",
         "descriptionText": "Build Python apps",
         "link": "https://www.linkedin.com/jobs/view/123",
-        "publishedAt": "2024-01-15",
+        "postedAt": "2024-01-15",
+        "seniorityLevel": "Mid-Senior level",
+        "employmentType": "Full-time",
+        "salary": "50000-70000 SEK/month",
     },
     {
         "id": "456",
@@ -319,7 +322,7 @@ LINKEDIN_ITEMS = [
         "location": "Remote",
         "descriptionText": "Build React apps",
         "link": "https://www.linkedin.com/jobs/view/456",
-        "publishedAt": "2024-01-16",
+        "postedAt": "2024-01-16",
     },
 ]
 
@@ -372,6 +375,82 @@ class TestLinkedIn:
         assert result.listings[0].external_id == "123"
         assert result.listings[1].is_remote is True
         assert result.errors == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_maps_new_fields(self, linkedin_profile):
+        """Test that seniorityLevel, employmentType, and salary are mapped."""
+        respx.post(
+            "https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_run_response())
+        )
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(
+            return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED"))
+        )
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=LINKEDIN_ITEMS))
+
+        collector = LinkedInCollector()
+        result = await collector.collect(linkedin_profile)
+
+        # First item has all new fields
+        assert result.listings[0].seniority_level == "Mid-Senior level"
+        assert result.listings[0].employment_type == "Full-time"
+        assert result.listings[0].salary == "50000-70000 SEK/month"
+        # Second item has no new fields -> None
+        assert result.listings[1].seniority_level is None
+        assert result.listings[1].employment_type is None
+        assert result.listings[1].salary is None
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_collect_prefers_description_text(self, linkedin_profile):
+        """Test descriptionText is preferred over descriptionHtml."""
+        items = [
+            {
+                "id": "789",
+                "title": "Dev",
+                "companyName": "Co",
+                "location": "Here",
+                "descriptionText": "Plain text desc",
+                "descriptionHtml": "<p>HTML desc</p>",
+                "link": "https://www.linkedin.com/jobs/view/789",
+            },
+            {
+                "id": "790",
+                "title": "Dev2",
+                "companyName": "Co2",
+                "location": "There",
+                "descriptionText": "",
+                "descriptionHtml": "<p>Fallback HTML</p>",
+                "link": "https://www.linkedin.com/jobs/view/790",
+            },
+        ]
+        respx.post(
+            "https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/runs",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=_apify_run_response()))
+        respx.get(
+            "https://api.apify.com/v2/actor-runs/run-1",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=_apify_status_response("SUCCEEDED")))
+        respx.get(
+            "https://api.apify.com/v2/datasets/ds-1/items",
+            params={"token": "test-token"},
+        ).mock(return_value=httpx.Response(200, json=items))
+
+        collector = LinkedInCollector()
+        result = await collector.collect(linkedin_profile)
+
+        assert result.listings[0].description == "Plain text desc"
+        assert result.listings[1].description == "<p>Fallback HTML</p>"
 
     @pytest.mark.asyncio
     async def test_collect_missing_token(self):

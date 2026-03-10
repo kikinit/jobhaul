@@ -8,13 +8,15 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 MIGRATIONS = {
     2: "ALTER TABLE analyses ADD COLUMN analysis_error TEXT",
     3: "ALTER TABLE analyses ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
     4: "ALTER TABLE listings ADD COLUMN application_deadline TEXT",
     5: "ALTER TABLE listings ADD COLUMN listing_status TEXT DEFAULT 'active'",
+    6: "ALTER TABLE listings ADD COLUMN seniority_level TEXT",
+    7: "ALTER TABLE listings ADD COLUMN salary TEXT",
 }
 
 SCHEMA_SQL = """
@@ -28,6 +30,8 @@ CREATE TABLE IF NOT EXISTS listings (
     published_at TEXT,
     is_remote INTEGER DEFAULT 0,
     employment_type TEXT,
+    seniority_level TEXT,
+    salary TEXT,
     application_deadline TEXT,
     listing_status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))

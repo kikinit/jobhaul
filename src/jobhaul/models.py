@@ -81,6 +81,8 @@ class JobListing(BaseModel):
     published_at: str | None = None
     is_remote: bool = False
     employment_type: str | None = None
+    seniority_level: str | None = None
+    salary: str | None = None
     sources: list[str] = Field(default_factory=list)
     created_at: str = ""
     application_deadline: str | None = None
@@ -98,6 +100,8 @@ class RawListing(BaseModel):
     published_at: str | None = None
     is_remote: bool = False
     employment_type: str | None = None
+    seniority_level: str | None = None
+    salary: str | None = None
     source: str = ""
     external_id: str = ""
     source_url: str | None = None

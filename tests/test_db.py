@@ -998,5 +998,5 @@ class TestMigrateV3ToV5:
         assert "listing_status" in cols
 
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 5
+        assert version == SCHEMA_VERSION
         conn.close()

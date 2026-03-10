@@ -72,7 +72,7 @@ class LinkedInCollector(Collector):
             start_urls.append(
                 {"url": f"https://www.linkedin.com/jobs/search/?{params}"}
             )
-        body = {"startUrls": start_urls, "maxItems": 50}
+        body = {"urls": start_urls, "maxItems": 50}
         resp = await client.post(
             f"{APIFY_RUN_URL}?token={token}", json=body
         )
@@ -122,18 +122,22 @@ class LinkedInCollector(Collector):
 
             title = item.get("title") or ""
             location = item.get("location") or ""
+            description = item.get("descriptionText") or item.get("descriptionHtml") or ""
             listings.append(
                 RawListing(
                     title=title,
                     company=item.get("companyName"),
                     location=location,
-                    description=item.get("descriptionText"),
+                    description=description or None,
                     url=job_url,
-                    published_at=item.get("publishedAt"),
+                    published_at=item.get("postedAt"),
                     is_remote=detect_remote(title, location),
                     source=self.name,
                     external_id=ext_id,
                     source_url=job_url,
+                    seniority_level=item.get("seniorityLevel"),
+                    employment_type=item.get("employmentType"),
+                    salary=item.get("salary"),
                 )
             )
         return listings
