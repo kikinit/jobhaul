@@ -7,8 +7,6 @@ import asyncio
 import pytest
 
 from jobhaul.collectors.stealth import (
-    CircuitBreaker,
-    RequestCounter,
     apply_stealth,
     get_random_user_agent,
     get_random_viewport,
@@ -110,48 +108,6 @@ class TestApplyStealth:
 
         # Should not raise
         await apply_stealth(page)
-
-
-class TestCircuitBreaker:
-    def test_closed_initially(self):
-        cb = CircuitBreaker(max_failures=3)
-        assert cb.is_open is False
-
-    def test_opens_after_threshold(self):
-        cb = CircuitBreaker(max_failures=3)
-        cb.record_failure()
-        cb.record_failure()
-        assert cb.is_open is False
-        cb.record_failure()
-        assert cb.is_open is True
-
-    def test_resets_on_success(self):
-        cb = CircuitBreaker(max_failures=3)
-        cb.record_failure()
-        cb.record_failure()
-        cb.record_success()
-        assert cb.is_open is False
-        # Need 3 consecutive failures again
-        cb.record_failure()
-        assert cb.is_open is False
-
-
-class TestRequestCounter:
-    def test_starts_at_zero(self):
-        rc = RequestCounter(max_requests=5)
-        assert rc.limit_reached is False
-
-    def test_reaches_limit(self):
-        rc = RequestCounter(max_requests=3)
-        rc.increment()
-        rc.increment()
-        assert rc.limit_reached is False
-        rc.increment()
-        assert rc.limit_reached is True
-
-    def test_default_limit(self):
-        rc = RequestCounter()
-        assert rc.max_requests == 50
 
 
 class TestCreateStealthContext:

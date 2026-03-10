@@ -1,4 +1,10 @@
-"""Orchestration: listing + profile -> LLM -> result."""
+"""Orchestration logic for matching job listings against a candidate profile.
+
+Combines a job listing and a user profile into an LLM prompt, sends it to the
+configured adapter, and parses the structured JSON response into an
+``AnalysisResult``. Also provides a lightweight keyword pre-screen that can
+skip obviously irrelevant listings before calling the LLM.
+"""
 
 from __future__ import annotations
 
@@ -25,13 +31,45 @@ RATE_LIMIT_DELAY = 60  # seconds to wait on rate limit before retrying
 
 
 def compute_profile_hash(profile: Profile) -> str:
-    """Hash the profile to detect when re-analysis is needed."""
+    """Create a short hash of the profile's match-relevant fields.
+
+    The hash is stored alongside each analysis result so we can tell whether
+    the profile has changed since the last analysis. If it has, the listing
+    should be re-analyzed.
+
+    Args:
+        profile: The candidate profile to hash.
+
+    Returns:
+        A 16-character hex string derived from a SHA-256 digest.
+    """
     data = profile.model_dump_json(exclude={"sources", "llm", "scraping", "analysis"})
     return hashlib.sha256(data.encode()).hexdigest()[:16]
 
 
+_DEFAULT_PROMPT_CONTEXT = (
+    "ALL candidate skills are at FOUNDATIONAL/ACADEMIC level from university "
+    "coursework and side projects. The candidate has LESS THAN 1 YEAR of "
+    "professional experience. Do NOT equate \"knows TypeScript\" with \"5 years "
+    "production TypeScript\". Treat all listed skills as beginner-to-intermediate."
+)
+
+
 def build_prompt(listing: JobListing, profile: Profile) -> str:
-    """Build the LLM analysis prompt."""
+    """Build the full LLM prompt that asks the model to score a listing.
+
+    The prompt includes the job listing details, the candidate profile, scoring
+    rules with dealbreakers and boosters, and the expected JSON output format.
+
+    Args:
+        listing: The job listing to evaluate.
+        profile: The candidate profile to match against.
+
+    Returns:
+        A multi-section prompt string ready to be sent to an LLM adapter.
+    """
+    skill_context = profile.prompt_context or _DEFAULT_PROMPT_CONTEXT
+
     return f"""Analyze this job listing against the candidate profile. Return a JSON object.
 
 ## Job Listing
@@ -59,7 +97,7 @@ Description:
 - Summary: {profile.summary}
 
 ## CRITICAL: Skill depth context
-ALL candidate skills are at FOUNDATIONAL/ACADEMIC level from university coursework and side projects. The candidate has LESS THAN 1 YEAR of professional experience. Do NOT equate "knows TypeScript" with "5 years production TypeScript". Treat all listed skills as beginner-to-intermediate.
+{skill_context}
 
 ## CRITICAL: Scoring rules (follow strictly)
 
@@ -108,7 +146,22 @@ def _to_list(value: str | list | None) -> list[str]:
 
 
 def parse_llm_response(response: str) -> dict:
-    """Parse LLM JSON response, handling common formatting issues."""
+    """Parse LLM JSON response, handling common formatting issues.
+
+    Uses regex-based extraction because the CLI adapter returns raw text (not
+    structured output). The function tries three strategies in order:
+
+    1. Strip markdown code fences and parse directly.
+    2. Direct JSON parse of the stripped text.
+    3. Regex extraction of the outermost ``{...}`` block from mixed text.
+
+    Future improvement: when using an API adapter with tool_use / structured
+    output support, the LLM can return validated JSON directly, making this
+    parsing step unnecessary.
+
+    Raises:
+        json.JSONDecodeError: If no valid JSON can be extracted.
+    """
     if not response or not response.strip():
         raise json.JSONDecodeError("Empty response", response or "", 0)
 
@@ -143,9 +196,20 @@ def parse_llm_response(response: str) -> dict:
 
 
 def pre_screen(listing: JobListing, profile: Profile) -> float:
-    """Simple keyword pre-screen: count profile terms that appear in the listing.
+    """Quick keyword check to see how relevant a listing is before calling the LLM.
 
-    Returns a ratio from 0.0 (no matches) to 1.0 (all terms match).
+    Counts how many of the profile's skills, roles, and search terms appear
+    anywhere in the listing title or description. This is intentionally simple
+    -- it exists to cheaply filter out completely irrelevant listings and save
+    LLM calls.
+
+    Args:
+        listing: The job listing to check.
+        profile: The candidate profile whose terms are matched.
+
+    Returns:
+        A float between 0.0 (no terms found) and 1.0 (every term found).
+        Returns 1.0 if the profile has no terms defined.
     """
     terms = set()
     for term in profile.skills + profile.roles + profile.search_terms:
@@ -167,9 +231,25 @@ async def analyze_listing(
 ) -> AnalysisResult:
     """Analyze a single listing against the profile using the LLM adapter.
 
-    Retries up to MAX_RETRIES times on timeout or transient errors with
-    exponential backoff. On total failure returns a zero-score result with
-    analysis_error set so the scan can continue.
+    Builds a prompt, sends it to the LLM, and parses the JSON response into
+    an ``AnalysisResult``. Retries up to ``MAX_RETRIES`` times on timeout,
+    rate-limit, or transient errors with exponential backoff. If the LLM
+    returns invalid JSON the prompt is resent once with an explicit
+    "respond with JSON only" instruction.
+
+    On total failure the function returns a zero-score result with
+    ``analysis_error`` set rather than raising, so the scan can continue
+    processing other listings.
+
+    Args:
+        listing: The job listing to evaluate.
+        profile: The candidate profile to match against.
+        adapter: The LLM backend to use for generating the analysis.
+
+    Returns:
+        An ``AnalysisResult`` with the match score, reasons, and other fields
+        populated from the LLM response, or a zero-score error result on
+        failure.
     """
     profile_hash = compute_profile_hash(profile)
     prompt = build_prompt(listing, profile)
@@ -179,7 +259,7 @@ async def analyze_listing(
     last_error: Exception | None = None
     for attempt in range(1 + MAX_RETRIES):
         try:
-            raw_response = await adapter.analyze(prompt)
+            raw_response = await adapter.complete(prompt)
             break
         except LLMRateLimitError as e:
             last_error = e
@@ -234,7 +314,7 @@ async def analyze_listing(
         logger.info("Retrying analysis for listing %d with explicit JSON request", listing.id)
         retry_prompt = prompt + "\n\n" + RETRY_PROMPT
         try:
-            raw_response = await adapter.analyze(retry_prompt)
+            raw_response = await adapter.complete(retry_prompt)
             data = parse_llm_response(raw_response)
         except (json.JSONDecodeError, ValueError, Exception) as retry_e:
             logger.warning(

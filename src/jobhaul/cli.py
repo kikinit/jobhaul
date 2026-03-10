@@ -1,4 +1,9 @@
-"""Typer CLI entrypoint."""
+"""Command-line interface for Jobhaul.
+
+Defines all Typer commands that a user can run from the terminal, including
+scanning for new listings, listing/showing results, triggering analysis, and
+launching the web dashboard. This module is the main entrypoint for the CLI.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from jobhaul.config import init_profile, load_profile
+from jobhaul.constants import MAX_COMPANY_DISPLAY_CHARS, MAX_TITLE_DISPLAY_CHARS
 from jobhaul.db import get_db
 from jobhaul.log import get_logger
 
@@ -35,7 +41,12 @@ def scan(
     ),
     limit: Optional[int] = typer.Option(None, help="Max number of listings to analyze"),
 ):
-    """Collect job listings and optionally analyze them."""
+    """Collect job listings from configured sources and optionally analyze them.
+
+    By default this command collects new listings and then runs LLM analysis on
+    any that have not been analyzed yet. Use the flags to run only collection,
+    only analysis, or to retry previously failed analyses.
+    """
     asyncio.run(_scan(source, skip_analysis, analyze_only, retry_failed, limit))
 
 
@@ -141,7 +152,11 @@ def list_listings(
     min_score: Optional[int] = typer.Option(None, "--min-score", help="Minimum match score"),
     days: int = typer.Option(7, help="Listings from last N days"),
 ):
-    """List recent job listings."""
+    """List recent job listings in a Rich table.
+
+    Supports filtering by source, minimum match score, and time window. When
+    ``--top`` or ``--min-score`` is provided, results are sorted by score.
+    """
     from jobhaul.db.queries import get_analysis
     from jobhaul.db.queries import list_listings as db_list
     from jobhaul.flagging import flag_listing
@@ -190,8 +205,8 @@ def list_listings(
 
             table.add_row(
                 str(listing.id),
-                listing.title[:50],
-                (listing.company or "?")[:25],
+                listing.title[:MAX_TITLE_DISPLAY_CHARS],
+                (listing.company or "?")[:MAX_COMPANY_DISPLAY_CHARS],
                 (listing.location or "?")[:20],
                 "Yes" if listing.is_remote else "No",
                 ", ".join(listing.sources),
@@ -204,7 +219,12 @@ def list_listings(
 
 @app.command()
 def show(listing_id: int = typer.Argument(..., help="Listing ID to show")):
-    """Show full detail for a listing including analysis."""
+    """Show full detail for a single listing including its analysis results.
+
+    Prints the listing metadata, description (truncated), flag information,
+    and the complete LLM analysis breakdown (score, reasons, strengths,
+    missing skills, concerns, and application notes).
+    """
     from jobhaul.db.queries import get_analysis, get_listing
     from jobhaul.flagging import flag_listing
 
@@ -272,7 +292,12 @@ def analyze(
     all_: bool = typer.Option(False, "--all", help="Analyze all unanalyzed listings"),
     limit: Optional[int] = typer.Option(None, help="Max listings to analyze (with --all)"),
 ):
-    """(Re-)analyze a single listing, or all unanalyzed listings with --all."""
+    """Run LLM analysis on a single listing or all unanalyzed listings.
+
+    Pass a listing ID to analyze (or re-analyze) one specific listing. Use
+    ``--all`` to process every listing that has not been analyzed yet, with an
+    optional ``--limit`` to cap the number of listings processed in one run.
+    """
     asyncio.run(_analyze(listing_id, all_, limit))
 
 
@@ -326,26 +351,30 @@ async def _analyze(listing_id: int, all_: bool, limit: int | None):
 
 @app.command()
 def stats():
-    """Show summary statistics."""
+    """Show summary statistics about the local database.
+
+    Displays total listings, source entry counts, dedup savings, analysis
+    counts, average score, and a per-source breakdown.
+    """
     from jobhaul.db.queries import get_stats
 
     with get_db() as conn:
         s = get_stats(conn)
 
     console.print("\n[bold]Jobhaul Statistics[/bold]")
-    console.print(f"Total unique listings: {s['total_listings']}")
-    console.print(f"Total source entries: {s['total_source_entries']}")
-    console.print(f"Dedup savings: {s['dedup_savings']} duplicates merged")
-    console.print(f"Total analyses: {s['total_analyses']}")
-    console.print(f"Average score: {s['avg_score']}")
+    console.print(f"Total unique listings: {s.total_listings}")
+    console.print(f"Total source entries: {s.total_source_entries}")
+    console.print(f"Dedup savings: {s.dedup_savings} duplicates merged")
+    console.print(f"Total analyses: {s.total_analyses}")
+    console.print(f"Average score: {s.avg_score}")
     console.print("\nListings by source:")
-    for src, count in s["source_counts"].items():
+    for src, count in s.source_counts.items():
         console.print(f"  {src}: {count}")
 
 
 @config_app.command("show")
 def config_show():
-    """Print the current profile configuration."""
+    """Print the current profile configuration as YAML."""
     import yaml
 
     profile = load_profile()
@@ -366,7 +395,11 @@ def config_init():
 
 @db_app.command("maintenance")
 def db_maintenance():
-    """Run DB maintenance: merge duplicates and backfill dedup keys."""
+    """Run database maintenance tasks.
+
+    Scans for duplicate listings that share the same dedup key and merges
+    them, preserving all source information on the surviving record.
+    """
     from jobhaul.db.queries import merge_existing_duplicates
 
     with get_db() as conn:
@@ -382,7 +415,11 @@ def serve(
     port: int = typer.Option(8080, help="Port to serve on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
 ):
-    """Start the web dashboard."""
+    """Start the web dashboard.
+
+    Launches a Uvicorn server hosting the FastAPI web application, which
+    provides an HTML UI and a JSON API for browsing listings and results.
+    """
     import uvicorn
 
     from jobhaul.web.app import app as web_app

@@ -1,11 +1,17 @@
-"""RemoteOK JSON feed collector."""
+"""Collector for RemoteOK, a remote-only job board.
+
+Fetches the public JSON feed at remoteok.com/api and filters listings to
+those whose tags match the user's configured skills.  All listings from
+this source are marked as remote since RemoteOK only lists remote positions.
+"""
 
 from __future__ import annotations
 
 import httpx
 
-from jobhaul.collectors.base import Collector
+from jobhaul.collectors.base import Collector, request_with_retry
 from jobhaul.collectors.registry import register
+from jobhaul.constants import MAX_DESCRIPTION_CHARS
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
@@ -16,9 +22,26 @@ API_URL = "https://remoteok.com/api"
 
 @register
 class RemoteOKCollector(Collector):
+    """Fetches remote job listings from the RemoteOK public JSON feed.
+
+    Downloads the full feed once, then filters it to listings whose tags
+    overlap with the user's skills list.  Every listing is marked as
+    remote because RemoteOK is a remote-only job board.
+    """
+
     name = "remoteok"
 
     async def collect(self, profile: Profile) -> CollectorResult:
+        """Collect job listings from RemoteOK, filtered by the user's skills.
+
+        Args:
+            profile: The user's search profile.  The ``remoteok`` source
+                config must be present and enabled.  Listings are filtered
+                against ``profile.skills``.
+
+        Returns:
+            A ``CollectorResult`` with matched listings and any errors.
+        """
         source_config = profile.sources.get("remoteok")
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
@@ -51,7 +74,7 @@ class RemoteOKCollector(Collector):
                     title=title,
                     company=company,
                     location=job.get("location"),
-                    description=desc[:5000],
+                    description=desc[:MAX_DESCRIPTION_CHARS],
                     url=job.get("url"),
                     published_at=job.get("date"),
                     is_remote=True,  # RemoteOK listings are inherently remote
@@ -67,25 +90,8 @@ class RemoteOKCollector(Collector):
 
     async def _fetch(self, profile: Profile) -> list:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await self._request_with_retry(client)
+            resp = await request_with_retry(
+                client, "GET", API_URL,
+                headers={"User-Agent": "Jobhaul/0.1 (job search aggregator)"},
+            )
             return resp.json()
-
-    async def _request_with_retry(
-        self, client: httpx.AsyncClient, retries: int = 3
-    ) -> httpx.Response:
-        import asyncio
-
-        for attempt in range(retries):
-            try:
-                resp = await client.get(
-                    API_URL, headers={"User-Agent": "Jobhaul/0.1 (job search aggregator)"}
-                )
-                resp.raise_for_status()
-                return resp
-            except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt == retries - 1:
-                    raise
-                wait = 2**attempt
-                logger.warning("RemoteOK retry %d after error: %s", attempt + 1, e)
-                await asyncio.sleep(wait)
-        raise RuntimeError("Unreachable")

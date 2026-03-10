@@ -1,4 +1,9 @@
-"""Jooble API collector."""
+"""Collector for Jooble, an international job-search aggregator.
+
+Uses the Jooble REST API (requires an API key configured in the user's
+profile) to search for listings by keyword and location.  Results are
+de-duplicated by external ID within each scan.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +11,9 @@ import asyncio
 
 import httpx
 
-from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
+from jobhaul.collectors.base import Collector, detect_remote, request_with_retry
 from jobhaul.collectors.registry import register
+from jobhaul.constants import MAX_DESCRIPTION_CHARS
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
@@ -18,9 +24,25 @@ API_URL_TEMPLATE = "https://jooble.org/api/{api_key}"
 
 @register
 class JoobleCollector(Collector):
+    """Fetches job listings from the Jooble REST API.
+
+    Sends a POST request per search term with the keyword and location,
+    then de-duplicates results by external ID.  Requires a Jooble API key
+    in the source configuration.
+    """
+
     name = "jooble"
 
     async def collect(self, profile: Profile) -> CollectorResult:
+        """Collect job listings from Jooble for all search terms.
+
+        Args:
+            profile: The user's search profile.  The ``jooble`` source
+                config must be present, enabled, and have a valid ``api_key``.
+
+        Returns:
+            A ``CollectorResult`` with de-duplicated listings and any errors.
+        """
         source_config = profile.sources.get("jooble")
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
@@ -67,7 +89,7 @@ class JoobleCollector(Collector):
         location: str,
     ) -> list[RawListing]:
         body = {"keywords": term, "location": location}
-        resp = await self._request_with_retry(client, url, body)
+        resp = await request_with_retry(client, "POST", url, json=body)
         data = resp.json()
         jobs = data.get("jobs", [])
 
@@ -81,7 +103,7 @@ class JoobleCollector(Collector):
                     title=title,
                     company=job.get("company"),
                     location=job.get("location"),
-                    description=desc[:5000],
+                    description=desc[:MAX_DESCRIPTION_CHARS],
                     url=job.get("link"),
                     published_at=job.get("updated"),
                     is_remote=detect_remote(title, desc),
@@ -93,37 +115,3 @@ class JoobleCollector(Collector):
             )
         return listings
 
-    async def _request_with_retry(
-        self, client: httpx.AsyncClient, url: str, body: dict, retries: int = 3
-    ) -> httpx.Response:
-        rate_limit_hits = 0
-        attempt = 0
-        while attempt < retries:
-            try:
-                resp = await client.post(url, json=body)
-                if resp.status_code == 429:
-                    rate_limit_hits += 1
-                    if rate_limit_hits >= 3:
-                        raise RuntimeError(
-                            "Jooble: rate limited 3 times, aborting to preserve quota"
-                        )
-                    wait = handle_rate_limit(resp, "Jooble")
-                    await asyncio.sleep(wait)
-                    continue  # Don't count toward normal retries
-                resp.raise_for_status()
-                return resp
-            except httpx.HTTPStatusError as e:
-                if attempt == retries - 1:
-                    raise
-                wait = 2**attempt
-                logger.warning("Jooble retry %d after error: %s", attempt + 1, e)
-                await asyncio.sleep(wait)
-                attempt += 1
-            except httpx.TransportError as e:
-                if attempt == retries - 1:
-                    raise
-                wait = 2**attempt
-                logger.warning("Jooble retry %d after error: %s", attempt + 1, e)
-                await asyncio.sleep(wait)
-                attempt += 1
-        raise RuntimeError("Unreachable")

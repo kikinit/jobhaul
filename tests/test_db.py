@@ -455,13 +455,33 @@ class TestStats:
         save_analysis(conn, analysis)
 
         stats = get_stats(conn)
-        assert stats["total_listings"] == 1
-        assert stats["total_source_entries"] == 2
-        assert stats["dedup_savings"] == 1
-        assert stats["total_analyses"] == 1
-        assert stats["avg_score"] == 80.0
-        assert stats["source_counts"]["platsbanken"] == 1
-        assert stats["source_counts"]["remoteok"] == 1
+        assert stats.total_listings == 1
+        assert stats.total_source_entries == 2
+        assert stats.dedup_savings == 1
+        assert stats.total_analyses == 1
+        assert stats.avg_score == 80.0
+        assert stats.source_counts["platsbanken"] == 1
+        assert stats.source_counts["remoteok"] == 1
+
+    def test_stats_is_pydantic_model(self, conn, sample_listing):
+        """Stats return value is a typed Pydantic model, not a plain dict."""
+        from jobhaul.models import Stats
+
+        upsert_listing(conn, sample_listing)
+        stats = get_stats(conn)
+        assert isinstance(stats, Stats)
+        # Verify it can be serialized to dict/JSON
+        d = stats.model_dump()
+        assert "total_listings" in d
+        assert "source_counts" in d
+
+    def test_stats_empty_db(self, conn):
+        """Stats work on an empty database."""
+        stats = get_stats(conn)
+        assert stats.total_listings == 0
+        assert stats.total_analyses == 0
+        assert stats.avg_score == 0
+        assert stats.source_counts == {}
 
 
 # -- Schema migration tests (Issue #16) ----------------------------------------

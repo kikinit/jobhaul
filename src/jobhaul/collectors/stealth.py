@@ -1,4 +1,8 @@
-"""Shared stealth utilities for browser-based scrapers."""
+"""Stealth utilities that help browser-based scrapers avoid bot detection.
+
+Provides randomized user agents, viewport sizes, and request delays, as
+well as Playwright page patches that mask common automation fingerprints.
+"""
 
 from __future__ import annotations
 
@@ -108,36 +112,3 @@ async def create_stealth_context(browser, scraping_config=None):
         logger.debug("playwright-stealth not installed, skipping stealth patches")
 
     return context
-
-
-class CircuitBreaker:
-    """Abort scraping after too many consecutive failures."""
-
-    def __init__(self, max_failures: int = 3):
-        self.max_failures = max_failures
-        self.consecutive_failures = 0
-
-    def record_success(self) -> None:
-        self.consecutive_failures = 0
-
-    def record_failure(self) -> None:
-        self.consecutive_failures += 1
-
-    @property
-    def is_open(self) -> bool:
-        return self.consecutive_failures >= self.max_failures
-
-
-class RequestCounter:
-    """Track and enforce request limits per run."""
-
-    def __init__(self, max_requests: int = 50):
-        self.max_requests = max_requests
-        self.count = 0
-
-    def increment(self) -> None:
-        self.count += 1
-
-    @property
-    def limit_reached(self) -> bool:
-        return self.count >= self.max_requests

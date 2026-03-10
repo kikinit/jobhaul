@@ -1,4 +1,9 @@
-"""LinkedIn job listings collector using Apify API."""
+"""Collector for LinkedIn job listings via the Apify scraping platform.
+
+Delegates the actual LinkedIn scraping to an Apify actor, polls for
+completion, and maps the returned dataset items to ``RawListing`` objects.
+Requires an Apify API token configured in the user's profile.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ import httpx
 
 from jobhaul.collectors.base import ApifyCollectorMixin, Collector, detect_remote
 from jobhaul.collectors.registry import register
+from jobhaul.constants import APIFY_MAX_ITEMS
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
@@ -19,9 +25,26 @@ APIFY_RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
 
 @register
 class LinkedInCollector(ApifyCollectorMixin, Collector):
+    """Scrapes LinkedIn job listings through the Apify cloud platform.
+
+    Builds LinkedIn search URLs from the user's search terms and location,
+    submits them to an Apify actor, waits for the scraping run to finish,
+    and converts the raw results into ``RawListing`` objects.
+    """
+
     name = "linkedin"
 
     async def collect(self, profile: Profile) -> CollectorResult:
+        """Collect job listings from LinkedIn via an Apify actor run.
+
+        Args:
+            profile: The user's search profile.  The ``linkedin`` source
+                config must be present, enabled, and include an
+                ``apify_token``.
+
+        Returns:
+            A ``CollectorResult`` with de-duplicated listings and any errors.
+        """
         source_config = profile.sources.get("linkedin")
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
@@ -63,7 +86,7 @@ class LinkedInCollector(ApifyCollectorMixin, Collector):
             start_urls.append(
                 {"url": f"https://www.linkedin.com/jobs/search/?{params}"}
             )
-        return {"urls": start_urls, "maxItems": 50}
+        return {"urls": start_urls, "maxItems": APIFY_MAX_ITEMS}
 
     def _map_results(self, items: list[dict]) -> list[RawListing]:
         listings: list[RawListing] = []

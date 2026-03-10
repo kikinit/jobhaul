@@ -1,4 +1,11 @@
-"""DB init and migrations."""
+"""Database schema definition and migration system.
+
+Contains the full SQL schema for a fresh database and an ordered set of
+incremental migrations.  When the application starts, ``init_db`` creates any
+missing tables and then ``run_migrations`` applies every migration whose
+version number is higher than the last recorded version, keeping the
+schema up to date without losing existing data.
+"""
 
 from __future__ import annotations
 
@@ -85,7 +92,18 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 
 def run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply pending schema migrations."""
+    """Apply any pending schema migrations that have not yet been recorded.
+
+    Iterates through the ``MIGRATIONS`` dictionary in version order.  For
+    each version that is higher than the latest version stored in the
+    ``schema_version`` table, the corresponding SQL statement is executed
+    and the new version number is recorded.  Special post-migration hooks
+    (such as back-filling new columns) run automatically when needed.
+
+    Args:
+        conn: An open SQLite connection that already has the base schema
+            tables created.
+    """
     current = conn.execute(
         "SELECT COALESCE(MAX(version), 1) FROM schema_version"
     ).fetchone()[0]
@@ -123,7 +141,21 @@ def _backfill_dedup_keys(conn: sqlite3.Connection) -> None:
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
-    """Initialize the database and return a connection."""
+    """Create the database (if needed), apply migrations, and return a connection.
+
+    Opens a connection to the SQLite file at *db_path*, enables WAL journal
+    mode and foreign-key enforcement, and creates all tables and indexes
+    defined in ``SCHEMA_SQL``.  For a brand-new database the current
+    ``SCHEMA_VERSION`` is stamped so that no migrations run.  For an
+    existing database, ``run_migrations`` brings the schema up to date.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+
+    Returns:
+        An open ``sqlite3.Connection`` with ``row_factory`` set to
+        ``sqlite3.Row`` so that columns can be accessed by name.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

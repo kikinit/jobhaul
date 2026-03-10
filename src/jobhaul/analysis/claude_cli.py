@@ -1,4 +1,10 @@
-"""Claude CLI subprocess adapter."""
+"""Claude CLI subprocess adapter.
+
+Implements the LLMAdapter interface by spawning the ``claude`` CLI as a
+subprocess. The prompt is piped to stdin and the model's response is read
+from stdout. Handles timeouts, rate-limit detection, and automatic OAuth
+token refresh for OpenClaw-managed environments.
+"""
 
 from __future__ import annotations
 
@@ -26,11 +32,19 @@ _RATE_LIMIT_MARKERS = [
 
 
 class LLMTimeoutError(RuntimeError):
-    """Raised when the LLM subprocess exceeds its timeout."""
+    """Raised when the LLM subprocess exceeds its timeout.
+
+    This is a transient error -- the caller may retry the request after a
+    short delay. The subprocess is killed when the timeout fires.
+    """
 
 
 class LLMRateLimitError(RuntimeError):
-    """Raised when the LLM returns a rate limit or overload error."""
+    """Raised when the LLM returns a rate-limit or overload error.
+
+    Detected by scanning stderr for known rate-limit markers (HTTP 429,
+    "overloaded", etc.). The caller should wait longer before retrying.
+    """
 
 
 def _refresh_claude_token() -> None:
@@ -53,12 +67,37 @@ def _refresh_claude_token() -> None:
 
 
 class ClaudeCliAdapter(LLMAdapter):
+    """LLM adapter that calls the ``claude`` CLI as a subprocess.
+
+    On construction the adapter attempts to refresh the OAuth token from an
+    OpenClaw agent directory (if present). Each call to ``complete`` spawns a
+    new ``claude -p`` process, pipes the prompt via stdin, and returns stdout.
+
+    Args:
+        model: The Claude model identifier to pass to the CLI.
+        timeout: Maximum seconds to wait for the subprocess before killing it.
+    """
+
     def __init__(self, model: str = "claude-sonnet-4-20250514", timeout: int = DEFAULT_TIMEOUT):
         self.model = model
         self.timeout = timeout
         _refresh_claude_token()
 
-    async def analyze(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
+        """Send a prompt to the Claude CLI and return the response text.
+
+        Args:
+            prompt: The full prompt to send to the model.
+
+        Returns:
+            The model's text response with leading/trailing whitespace stripped.
+
+        Raises:
+            LLMTimeoutError: If the subprocess does not finish within ``self.timeout`` seconds.
+            LLMRateLimitError: If the CLI reports a rate-limit or overload condition.
+            RuntimeError: If the CLI exits with a non-zero code for other reasons,
+                or if the ``claude`` binary is not found on the system PATH.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 "claude",

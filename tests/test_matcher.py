@@ -25,7 +25,7 @@ class MockAdapter(LLMAdapter):
         self.last_prompt = None
         self.call_count = 0
 
-    async def analyze(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
         self.last_prompt = prompt
         self.call_count += 1
         return self.response
@@ -38,7 +38,7 @@ class RetryMockAdapter(LLMAdapter):
         self.responses = [first, second]
         self.call_count = 0
 
-    async def analyze(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
         idx = min(self.call_count, len(self.responses) - 1)
         self.call_count += 1
         return self.responses[idx]
@@ -52,7 +52,7 @@ class TimeoutThenSuccessAdapter(LLMAdapter):
         self.success_response = success_response
         self.call_count = 0
 
-    async def analyze(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
         self.call_count += 1
         if self.call_count <= self.fail_count:
             raise LLMTimeoutError(f"claude CLI timed out after 90s")
@@ -65,7 +65,7 @@ class AlwaysTimeoutAdapter(LLMAdapter):
     def __init__(self):
         self.call_count = 0
 
-    async def analyze(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
         self.call_count += 1
         raise LLMTimeoutError("claude CLI timed out after 90s")
 

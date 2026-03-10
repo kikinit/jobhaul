@@ -43,7 +43,7 @@ class TestClaudeCliTimeout:
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             with pytest.raises(LLMTimeoutError, match="timed out"):
-                await adapter.analyze("test prompt")
+                await adapter.complete("test prompt")
 
     @pytest.mark.asyncio
     async def test_timeout_error_is_runtime_error_subclass(self):

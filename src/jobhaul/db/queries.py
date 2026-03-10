@@ -1,4 +1,10 @@
-"""All DB operations."""
+"""Data-access layer for jobhaul's SQLite database.
+
+Every public function in this module accepts an open ``sqlite3.Connection``
+as its first argument and performs one logical database operation (query,
+insert, update, or upsert).  Higher-level code should never construct SQL
+directly; instead, call the helpers defined here.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +13,9 @@ import json
 import re
 import sqlite3
 
+from jobhaul.constants import MAX_ANALYSIS_FAIL_RETRIES
 from jobhaul.log import get_logger
-from jobhaul.models import AnalysisResult, JobListing, RawListing
+from jobhaul.models import AnalysisResult, JobListing, RawListing, Stats
 
 logger = get_logger(__name__)
 
@@ -31,7 +38,20 @@ def _compute_dedup_key(title: str, company: str | None) -> str:
 
 
 def find_duplicate(conn: sqlite3.Connection, title: str, company: str | None) -> int | None:
-    """Find an existing listing with the same normalized title+company."""
+    """Find an existing listing whose title and company match after normalisation.
+
+    Looks up the SHA-256 dedup key first (fast path).  If no match is found,
+    falls back to a full-table scan of rows that predate the dedup-key
+    migration and have no key yet.
+
+    Args:
+        conn: Open database connection.
+        title: Job listing title to search for.
+        company: Company name (may be *None*).
+
+    Returns:
+        The ``id`` of the matching listing, or *None* if no duplicate exists.
+    """
     key = _compute_dedup_key(title, company)
     row = conn.execute("SELECT id FROM listings WHERE dedup_key = ?", (key,)).fetchone()
     if row:
@@ -51,7 +71,19 @@ def find_duplicate(conn: sqlite3.Connection, title: str, company: str | None) ->
 
 
 def merge_existing_duplicates(conn: sqlite3.Connection) -> int:
-    """Scan for existing duplicates and merge them. Returns number of merges performed."""
+    """Scan every listing for duplicates and merge them into the oldest record.
+
+    Groups all listings by their normalised title and company.  When a group
+    contains more than one row, the oldest listing (lowest ``id``) is kept
+    and every newer duplicate's sources and analyses are re-pointed to the
+    keeper before the duplicate row is deleted.
+
+    Args:
+        conn: Open database connection.
+
+    Returns:
+        The number of individual duplicate rows that were merged (removed).
+    """
     rows = conn.execute("SELECT id, title, company FROM listings ORDER BY id").fetchall()
 
     # Group by normalized title+company
@@ -92,7 +124,21 @@ def merge_existing_duplicates(conn: sqlite3.Connection) -> int:
 
 
 def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
-    """Insert or deduplicate a listing, returning the listing ID."""
+    """Insert a new listing or update an existing duplicate, returning the listing ID.
+
+    If a listing with the same normalised title and company already exists,
+    only mutable fields (like ``application_deadline``) are updated on the
+    existing row.  Otherwise a brand-new row is inserted.  In both cases a
+    corresponding ``listing_sources`` row is added so that the originating
+    job board is tracked.
+
+    Args:
+        conn: Open database connection.
+        raw: The scraped listing data to persist.
+
+    Returns:
+        The integer ``id`` of the listing row (existing or newly created).
+    """
     existing_id = find_duplicate(conn, raw.title, raw.company)
 
     if existing_id:
@@ -138,15 +184,13 @@ def upsert_listing(conn: sqlite3.Connection, raw: RawListing) -> int:
     return listing_id
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    """Check if a column exists in a table."""
-    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    return column in cols
-
 
 def _row_to_listing(row: sqlite3.Row, sources: list[str]) -> JobListing:
-    """Convert a DB row + sources list into a JobListing model."""
-    keys = row.keys()
+    """Convert a DB row + sources list into a JobListing model.
+
+    All columns (seniority_level, salary, application_deadline, listing_status)
+    are guaranteed to exist after schema migrations up to v8.
+    """
     return JobListing(
         id=row["id"],
         title=row["title"],
@@ -157,17 +201,25 @@ def _row_to_listing(row: sqlite3.Row, sources: list[str]) -> JobListing:
         published_at=row["published_at"],
         is_remote=bool(row["is_remote"]),
         employment_type=row["employment_type"],
-        seniority_level=row["seniority_level"] if "seniority_level" in keys else None,
-        salary=row["salary"] if "salary" in keys else None,
+        seniority_level=row["seniority_level"],
+        salary=row["salary"],
         sources=sources,
         created_at=row["created_at"],
-        application_deadline=row["application_deadline"] if "application_deadline" in keys else None,
-        listing_status=row["listing_status"] if "listing_status" in keys else "active",
+        application_deadline=row["application_deadline"],
+        listing_status=row["listing_status"] or "active",
     )
 
 
 def get_listing(conn: sqlite3.Connection, listing_id: int) -> JobListing | None:
-    """Get a single listing by ID with its sources."""
+    """Fetch a single listing by its primary key, including its source list.
+
+    Args:
+        conn: Open database connection.
+        listing_id: The ``id`` column value of the listing to retrieve.
+
+    Returns:
+        A ``JobListing`` object, or *None* if no listing with that ID exists.
+    """
     row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
     if not row:
         return None
@@ -192,9 +244,26 @@ def list_listings(
     sort_by_score: bool = False,
     include_expired: bool = False,
 ) -> list[JobListing]:
-    """List listings with optional filters."""
-    has_status = _has_column(conn, "listings", "listing_status")
+    """Return a filtered list of job listings, newest first by default.
 
+    Supports filtering by recency, source board, minimum analysis score,
+    and expiration status.  Results can optionally be sorted by match score
+    (descending) instead of creation date.
+
+    Args:
+        conn: Open database connection.
+        days: Only include listings created within this many days.
+        source: If given, only include listings from this job board.
+        min_score: If given, only include listings whose analysis score is
+            at least this value.
+        limit: Maximum number of listings to return.
+        sort_by_score: When *True*, sort by match score (highest first)
+            instead of creation date.
+        include_expired: When *True*, include listings marked as expired.
+
+    Returns:
+        A list of ``JobListing`` objects matching the filters.
+    """
     query = """
         SELECT l.*, GROUP_CONCAT(ls.source) AS sources_csv
         FROM listings l
@@ -204,7 +273,7 @@ def list_listings(
     """
     params: list = [f"-{days} days"]
 
-    if has_status and not include_expired:
+    if not include_expired:
         query += " AND COALESCE(l.listing_status, 'active') = 'active'"
 
     if source:
@@ -246,9 +315,27 @@ def list_listings_with_analysis(
     sort_by_score: bool = False,
     include_expired: bool = False,
 ) -> list[tuple[JobListing, AnalysisResult | None]]:
-    """List listings with their analysis in a single query (no N+1)."""
-    has_status = _has_column(conn, "listings", "listing_status")
+    """Return listings together with their analysis results in one query.
 
+    Works exactly like ``list_listings`` but also LEFT JOINs the analyses
+    table so that each listing is paired with its ``AnalysisResult`` (or
+    *None* if not yet analysed).  This avoids the N+1 query problem when
+    rendering dashboards or reports.
+
+    Args:
+        conn: Open database connection.
+        days: Only include listings created within this many days.
+        source: If given, only include listings from this job board.
+        min_score: If given, only include listings whose analysis score is
+            at least this value.
+        limit: Maximum number of listings to return.
+        sort_by_score: When *True*, sort by match score (highest first)
+            instead of creation date.
+        include_expired: When *True*, include listings marked as expired.
+
+    Returns:
+        A list of ``(JobListing, AnalysisResult | None)`` tuples.
+    """
     query = """
         SELECT l.*,
                GROUP_CONCAT(ls.source) AS sources_csv,
@@ -270,7 +357,7 @@ def list_listings_with_analysis(
     """
     params: list = [f"-{days} days"]
 
-    if has_status and not include_expired:
+    if not include_expired:
         query += " AND COALESCE(l.listing_status, 'active') = 'active'"
 
     if source:
@@ -321,7 +408,16 @@ def list_listings_with_analysis(
 
 
 def mark_likely_expired(conn: sqlite3.Connection, listing_id: int) -> None:
-    """Mark a listing as likely expired."""
+    """Set a listing's status to ``'likely_expired'``.
+
+    Use this when a listing was not found during a recent scan and its
+    application deadline has passed, but removal has not been confirmed
+    by visiting the original URL.
+
+    Args:
+        conn: Open database connection.
+        listing_id: Primary key of the listing to update.
+    """
     conn.execute(
         "UPDATE listings SET listing_status = 'likely_expired' WHERE id = ?",
         (listing_id,),
@@ -330,7 +426,16 @@ def mark_likely_expired(conn: sqlite3.Connection, listing_id: int) -> None:
 
 
 def mark_confirmed_expired(conn: sqlite3.Connection, listing_id: int) -> None:
-    """Mark a listing as confirmed expired."""
+    """Set a listing's status to ``'confirmed_expired'``.
+
+    Use this when the listing's removal has been verified (e.g. the
+    original URL returns a 404 or the job board explicitly marks it
+    as closed).
+
+    Args:
+        conn: Open database connection.
+        listing_id: Primary key of the listing to update.
+    """
     conn.execute(
         "UPDATE listings SET listing_status = 'confirmed_expired' WHERE id = ?",
         (listing_id,),
@@ -341,9 +446,20 @@ def mark_confirmed_expired(conn: sqlite3.Connection, listing_id: int) -> None:
 def check_and_mark_expired(
     conn: sqlite3.Connection, collected_external_ids: set[str],
 ) -> int:
-    """Mark active listings with past deadline not seen in current scan as likely expired.
+    """Mark active listings as likely expired if their deadline has passed.
 
-    Returns the number of listings marked.
+    Looks at every active listing that has an ``application_deadline`` in
+    the past.  If none of that listing's external IDs appeared in the
+    current scan's *collected_external_ids*, the listing is marked as
+    ``'likely_expired'``.
+
+    Args:
+        conn: Open database connection.
+        collected_external_ids: The set of external IDs that were seen
+            during the most recent collection run.
+
+    Returns:
+        The number of listings that were marked as likely expired.
     """
     from datetime import datetime, timezone
 
@@ -391,7 +507,21 @@ def _deserialize_list(value: str | None) -> list[str]:
 
 
 def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
-    """Save an analysis result (upsert on listing_id+profile_hash)."""
+    """Persist an analysis result, inserting or updating as needed.
+
+    Uses an ``INSERT ... ON CONFLICT DO UPDATE`` (upsert) keyed on the
+    combination of ``listing_id`` and ``profile_hash``.  If the result
+    contains an ``analysis_error``, the ``fail_count`` is incremented from
+    the previously stored value so that permanently failing listings can
+    be skipped after exceeding the retry limit.
+
+    Args:
+        conn: Open database connection.
+        result: The ``AnalysisResult`` to save.
+
+    Returns:
+        The ``rowid`` of the inserted or updated analyses row.
+    """
     # On failure, increment fail_count from existing row
     fail_count = result.fail_count
     if result.analysis_error:
@@ -439,7 +569,16 @@ def save_analysis(conn: sqlite3.Connection, result: AnalysisResult) -> int:
 
 
 def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | None:
-    """Get the most recent analysis for a listing."""
+    """Fetch the most recent analysis for a given listing.
+
+    Args:
+        conn: Open database connection.
+        listing_id: Primary key of the listing whose analysis is requested.
+
+    Returns:
+        An ``AnalysisResult`` object, or *None* if the listing has not been
+        analysed yet.
+    """
     row = conn.execute(
         "SELECT * FROM analyses WHERE listing_id = ? ORDER BY analyzed_at DESC LIMIT 1",
         (listing_id,),
@@ -465,10 +604,22 @@ def get_analysis(conn: sqlite3.Connection, listing_id: int) -> AnalysisResult | 
 def get_unanalyzed_listings(
     conn: sqlite3.Connection, profile_hash: str, limit: int | None = None
 ) -> list[JobListing]:
-    """Get listings that haven't been successfully analyzed with this profile hash.
+    """Return listings that still need analysis for a given profile.
 
-    Also re-queues listings whose latest analysis has analysis_error set,
-    unless fail_count >= 5 (permanently failed).
+    A listing is considered "unanalysed" if it either has no analysis row
+    for *profile_hash* at all, or its existing analysis row has
+    ``analysis_error`` set (meaning a previous attempt failed).  Listings
+    whose ``fail_count`` has reached ``MAX_ANALYSIS_FAIL_RETRIES`` are
+    treated as permanently failed and excluded.
+
+    Args:
+        conn: Open database connection.
+        profile_hash: Hash identifying the user profile to analyse against.
+        limit: Maximum number of listings to return.  *None* means no limit.
+
+    Returns:
+        A list of ``JobListing`` objects ordered by creation date, newest
+        first.
     """
     query = """
         SELECT l.* FROM listings l
@@ -480,11 +631,11 @@ def get_unanalyzed_listings(
         AND NOT EXISTS (
             SELECT 1 FROM analyses a
             WHERE a.listing_id = l.id AND a.profile_hash = ?
-              AND a.fail_count >= 5
+              AND a.fail_count >= ?
         )
         ORDER BY l.created_at DESC
     """
-    params: list = [profile_hash, profile_hash]
+    params: list = [profile_hash, profile_hash, MAX_ANALYSIS_FAIL_RETRIES]
     if limit:
         query += " LIMIT ?"
         params.append(limit)
@@ -505,18 +656,32 @@ def get_unanalyzed_listings(
 def get_failed_listings(
     conn: sqlite3.Connection, profile_hash: str, limit: int | None = None
 ) -> list[JobListing]:
-    """Get listings with analysis_error set (for --retry-failed)."""
+    """Return listings whose most recent analysis ended with an error.
+
+    Intended for the ``--retry-failed`` CLI flag.  Only includes listings
+    whose ``fail_count`` is still below ``MAX_ANALYSIS_FAIL_RETRIES`` so
+    that permanently broken analyses are not retried forever.
+
+    Args:
+        conn: Open database connection.
+        profile_hash: Hash identifying the user profile to filter by.
+        limit: Maximum number of listings to return.  *None* means no limit.
+
+    Returns:
+        A list of ``JobListing`` objects ordered by creation date, newest
+        first.
+    """
     query = """
         SELECT l.* FROM listings l
         WHERE EXISTS (
             SELECT 1 FROM analyses a
             WHERE a.listing_id = l.id AND a.profile_hash = ?
               AND a.analysis_error IS NOT NULL
-              AND a.fail_count < 5
+              AND a.fail_count < ?
         )
         ORDER BY l.created_at DESC
     """
-    params: list = [profile_hash]
+    params: list = [profile_hash, MAX_ANALYSIS_FAIL_RETRIES]
     if limit:
         query += " LIMIT ?"
         params.append(limit)
@@ -534,8 +699,20 @@ def get_failed_listings(
     return listings
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
-    """Get summary statistics."""
+def get_stats(conn: sqlite3.Connection) -> Stats:
+    """Compute high-level statistics about all data in the database.
+
+    Counts listings, source entries, analyses, and calculates the average
+    match score and per-source breakdown.  The ``dedup_savings`` field
+    shows how many duplicate source entries were collapsed into shared
+    listing rows.
+
+    Args:
+        conn: Open database connection.
+
+    Returns:
+        A ``Stats`` object with totals, averages, and per-source counts.
+    """
     total_listings = conn.execute("SELECT COUNT(*) as c FROM listings").fetchone()["c"]
     total_sources = conn.execute("SELECT COUNT(*) as c FROM listing_sources").fetchone()["c"]
     total_analyses = conn.execute("SELECT COUNT(*) as c FROM analyses").fetchone()["c"]
@@ -550,11 +727,11 @@ def get_stats(conn: sqlite3.Connection) -> dict:
 
     dedup_savings = total_sources - total_listings
 
-    return {
-        "total_listings": total_listings,
-        "total_source_entries": total_sources,
-        "dedup_savings": dedup_savings,
-        "total_analyses": total_analyses,
-        "avg_score": round(avg_score, 1) if avg_score else 0,
-        "source_counts": source_counts,
-    }
+    return Stats(
+        total_listings=total_listings,
+        total_source_entries=total_sources,
+        dedup_savings=dedup_savings,
+        total_analyses=total_analyses,
+        avg_score=round(avg_score, 1) if avg_score else 0,
+        source_counts=source_counts,
+    )

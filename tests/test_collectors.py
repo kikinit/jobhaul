@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from jobhaul.collectors.base import detect_remote
+from jobhaul.collectors.base import detect_remote, request_with_retry
 from jobhaul.collectors.indeed import IndeedCollector
 from jobhaul.collectors.jooble import JoobleCollector
 from jobhaul.collectors.linkedin import LinkedInCollector
@@ -797,3 +797,90 @@ class TestIndeed:
         assert result.listings[0].company is None
         assert result.listings[0].location == ""
         assert result.listings[0].description is None
+
+
+# -- request_with_retry shared helper tests ------------------------------------
+
+
+class TestRequestWithRetry:
+    """Tests for the shared request_with_retry function."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_success_on_first_try(self):
+        """Successful request returns immediately without retrying."""
+        url = "https://example.com/api"
+        respx.get(url).respond(200, json={"ok": True})
+
+        async with httpx.AsyncClient() as client:
+            resp = await request_with_retry(client, "GET", url)
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_retries_on_server_error(self):
+        """Retries on 500 and succeeds on second attempt."""
+        url = "https://example.com/api"
+        route = respx.get(url)
+        route.side_effect = [
+            httpx.Response(500, text="Server Error"),
+            httpx.Response(200, json={"ok": True}),
+        ]
+
+        async with httpx.AsyncClient() as client:
+            resp = await request_with_retry(
+                client, "GET", url, retries=2, backoff=[0.0]
+            )
+
+        assert resp.status_code == 200
+        assert route.call_count == 2
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_raises_after_all_retries_exhausted(self):
+        """Raises the last error after all retries are exhausted."""
+        url = "https://example.com/api"
+        respx.get(url).respond(503, text="Unavailable")
+
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(httpx.HTTPStatusError):
+                await request_with_retry(
+                    client, "GET", url, retries=2, backoff=[0.0]
+                )
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_post_method(self):
+        """Works with POST requests and passes kwargs through."""
+        url = "https://example.com/api"
+        respx.post(url).respond(200, json={"created": True})
+
+        async with httpx.AsyncClient() as client:
+            resp = await request_with_retry(
+                client, "POST", url, json={"key": "value"}
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"created": True}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_custom_backoff(self):
+        """Custom backoff list is respected."""
+        url = "https://example.com/api"
+        route = respx.get(url)
+        route.side_effect = [
+            httpx.Response(500, text="Error"),
+            httpx.Response(500, text="Error"),
+            httpx.Response(200, json={"ok": True}),
+        ]
+
+        async with httpx.AsyncClient() as client:
+            resp = await request_with_retry(
+                client, "GET", url, retries=3, backoff=[0.0, 0.0]
+            )
+
+        assert resp.status_code == 200
+        assert route.call_count == 3

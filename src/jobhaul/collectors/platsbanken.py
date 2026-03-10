@@ -1,4 +1,8 @@
-"""Arbetsförmedlingen JobStream API collector."""
+"""Collector for Platsbanken, the Swedish Public Employment Service job board.
+
+Uses the open JobSearch API (jobtechdev.se) to fetch listings.  No API key
+is required.  Results are paginated and de-duplicated across search terms.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +10,9 @@ import asyncio
 
 import httpx
 
-from jobhaul.collectors.base import Collector, detect_remote, handle_rate_limit
+from jobhaul.collectors.base import Collector, detect_remote, request_with_retry
 from jobhaul.collectors.registry import register
+from jobhaul.constants import MAX_DESCRIPTION_CHARS
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
@@ -21,9 +26,25 @@ RATE_LIMIT_DELAY = 0.2  # 200ms between requests
 
 @register
 class PlatsbankenCollector(Collector):
+    """Fetches job listings from the Swedish Platsbanken / Arbetsformedlingen API.
+
+    Iterates over the user's search terms, paginates through results for
+    each term, and de-duplicates listings by their external ID.  An optional
+    region filter narrows results to a specific Swedish region.
+    """
+
     name = "platsbanken"
 
     async def collect(self, profile: Profile) -> CollectorResult:
+        """Collect job listings from Platsbanken for all search terms.
+
+        Args:
+            profile: The user's search profile.  The ``platsbanken`` source
+                config must be present and enabled.
+
+        Returns:
+            A ``CollectorResult`` with de-duplicated listings and any errors.
+        """
         source_config = profile.sources.get("platsbanken")
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
@@ -66,7 +87,7 @@ class PlatsbankenCollector(Collector):
             if region:
                 params["region"] = region
 
-            resp = await self._request_with_retry(client, params)
+            resp = await request_with_retry(client, "GET", API_URL, params=params)
             data = resp.json()
             hits = data.get("hits", [])
 
@@ -93,7 +114,7 @@ class PlatsbankenCollector(Collector):
                         title=title,
                         company=company_name,
                         location=location,
-                        description=desc[:5000],
+                        description=desc[:MAX_DESCRIPTION_CHARS],
                         url=hit.get("webpage_url"),
                         published_at=hit.get("publication_date"),
                         is_remote=detect_remote(title, desc),
@@ -112,18 +133,3 @@ class PlatsbankenCollector(Collector):
 
         return listings
 
-    async def _request_with_retry(
-        self, client: httpx.AsyncClient, params: dict, retries: int = 3
-    ) -> httpx.Response:
-        for attempt in range(retries):
-            try:
-                resp = await client.get(API_URL, params=params)
-                resp.raise_for_status()
-                return resp
-            except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt == retries - 1:
-                    raise
-                wait = 2**attempt
-                logger.warning("Platsbanken retry %d after error: %s", attempt + 1, e)
-                await asyncio.sleep(wait)
-        raise RuntimeError("Unreachable")

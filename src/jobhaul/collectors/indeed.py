@@ -1,4 +1,9 @@
-"""Indeed job listings collector using Apify API."""
+"""Collector for Indeed job listings via the Apify scraping platform.
+
+Delegates the actual Indeed scraping to an Apify actor, polls for
+completion, and maps the returned dataset items to ``RawListing`` objects.
+Requires an Apify API token configured in the user's profile.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ import httpx
 
 from jobhaul.collectors.base import ApifyCollectorMixin, Collector, detect_remote
 from jobhaul.collectors.registry import register
+from jobhaul.constants import APIFY_MAX_ITEMS
 from jobhaul.log import get_logger
 from jobhaul.models import CollectorResult, Profile, RawListing
 
@@ -19,9 +25,26 @@ APIFY_RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
 
 @register
 class IndeedCollector(ApifyCollectorMixin, Collector):
+    """Scrapes Indeed job listings through the Apify cloud platform.
+
+    Submits one Apify actor run per search term (with position, location,
+    and country), waits for each to complete, and converts the raw results
+    into ``RawListing`` objects.
+    """
+
     name = "indeed"
 
     async def collect(self, profile: Profile) -> CollectorResult:
+        """Collect job listings from Indeed via Apify actor runs.
+
+        Args:
+            profile: The user's search profile.  The ``indeed`` source
+                config must be present, enabled, and include an
+                ``apify_token``.
+
+        Returns:
+            A ``CollectorResult`` with de-duplicated listings and any errors.
+        """
         source_config = profile.sources.get("indeed")
         if not source_config or not source_config.enabled:
             return CollectorResult(source=self.name)
@@ -44,7 +67,7 @@ class IndeedCollector(ApifyCollectorMixin, Collector):
                         "position": term,
                         "location": profile.location,
                         "country": country,
-                        "maxItems": 50,
+                        "maxItems": APIFY_MAX_ITEMS,
                     }
                     run_id, dataset_id = await self._start_apify_run(
                         client, token, APIFY_RUN_URL, body,

@@ -1,4 +1,9 @@
-"""FastAPI web application with HTML pages and JSON API."""
+"""FastAPI web application serving both HTML pages and a JSON API.
+
+Provides a dashboard, paginated listing browser, detail views, scan triggers,
+and a REST API under ``/api/``. All database access goes through FastAPI
+dependency injection so connections are properly opened and closed per request.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from jobhaul.constants import DEFAULT_PAGE_SIZE
 from jobhaul.db.queries import get_analysis, get_listing, get_stats, list_listings, list_listings_with_analysis, save_analysis
 
 WEB_DIR = Path(__file__).parent
@@ -24,7 +30,15 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def get_db_dep() -> Generator[sqlite3.Connection, None, None]:
-    """FastAPI dependency that yields a DB connection and closes it after."""
+    """FastAPI dependency that provides a database connection for a request.
+
+    Opens a new SQLite connection (initialising the schema if needed), yields
+    it for the duration of the request, and closes it automatically when the
+    request finishes.
+
+    Yields:
+        An open ``sqlite3.Connection`` instance.
+    """
     from jobhaul.config import ensure_data_dir
     from jobhaul.db.schema import init_db
 
@@ -36,7 +50,14 @@ def get_db_dep() -> Generator[sqlite3.Connection, None, None]:
 
 
 def get_profile_dep():
-    """FastAPI dependency that returns the current profile."""
+    """FastAPI dependency that loads and returns the current user profile.
+
+    Reads the profile YAML file on every request so that changes to the
+    profile are picked up without restarting the server.
+
+    Returns:
+        A ``Profile`` instance parsed from the profile configuration file.
+    """
     from jobhaul.config import load_profile
 
     return load_profile()
@@ -47,6 +68,7 @@ def get_profile_dep():
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, conn: sqlite3.Connection = Depends(get_db_dep)):
+    """Render the main dashboard page with summary stats and top matches."""
     stats = get_stats(conn)
     all_analyzed = list_listings_with_analysis(
         conn, days=30, min_score=1, sort_by_score=True, limit=10,
@@ -88,10 +110,11 @@ async def listings_page(
     page: int = Query(1, ge=1),
     include_expired: bool = Query(False),
 ):
+    """Render the paginated listings page with filtering and sorting options."""
     parsed_min_score = _parse_optional_int(min_score)
     parsed_days = _parse_optional_int(days) or 30
 
-    per_page = 50
+    per_page = DEFAULT_PAGE_SIZE
     all_pairs = list_listings_with_analysis(
         conn, days=parsed_days, source=source, min_score=parsed_min_score,
         sort_by_score=(sort == "score"),
@@ -137,6 +160,7 @@ async def listings_page(
 
 @app.get("/listings/{listing_id}", response_class=HTMLResponse)
 async def listing_detail(request: Request, listing_id: int, conn: sqlite3.Connection = Depends(get_db_dep)):
+    """Render the detail page for a single listing with its analysis."""
     listing = get_listing(conn, listing_id)
     if not listing:
         return HTMLResponse("<h1>Listing not found</h1>", status_code=404)
@@ -163,6 +187,7 @@ async def reanalyze_listing(
     conn: sqlite3.Connection = Depends(get_db_dep),
     profile=Depends(get_profile_dep),
 ):
+    """Re-run LLM analysis for a listing and redirect back to its detail page."""
     from jobhaul.analysis.claude_cli import ClaudeCliAdapter
     from jobhaul.analysis.matcher import analyze_listing, compute_profile_hash
 
