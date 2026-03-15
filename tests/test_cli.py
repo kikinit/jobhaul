@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,7 +17,7 @@ runner = CliRunner()
 
 @pytest.fixture
 def mock_db(tmp_path):
-    """Provide a temp DB and patch get_db context manager."""
+    """Provide a temp DB and patch get_db and async_get_db context managers."""
     from jobhaul.db.schema import init_db
 
     db_path = str(tmp_path / "test.db")
@@ -27,7 +27,12 @@ def mock_db(tmp_path):
     def fake_get_db(db_path=None):
         yield conn
 
-    with patch("jobhaul.cli.get_db", fake_get_db):
+    @asynccontextmanager
+    async def fake_async_get_db(db_path=None):
+        yield conn
+
+    with patch("jobhaul.cli.get_db", fake_get_db), \
+         patch("jobhaul.cli.async_get_db", fake_async_get_db):
         yield conn
 
     conn.close()

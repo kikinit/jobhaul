@@ -1309,3 +1309,63 @@ class TestThreadSafety:
 
         assert results[0][0] == "ok"
         conn.close()
+
+
+# -- Issue #23 tests: async_get_db does not block the event loop ---------------
+
+
+class TestAsyncGetDb:
+    """Test that async_get_db works correctly and does not block the event loop."""
+
+    def test_async_get_db_returns_connection(self, tmp_path):
+        """async_get_db should yield a working database connection."""
+        import asyncio
+
+        from jobhaul.db import async_get_db
+
+        async def run():
+            async with async_get_db(tmp_path / "async_test.db") as conn:
+                row = conn.execute("SELECT COUNT(*) as c FROM listings").fetchone()
+                return row["c"]
+
+        count = asyncio.run(run())
+        assert count == 0
+
+    def test_async_get_db_closes_connection(self, tmp_path):
+        """Connection should be closed after the async context manager exits."""
+        import asyncio
+
+        from jobhaul.db import async_get_db
+
+        conns = []
+
+        async def run():
+            async with async_get_db(tmp_path / "async_close.db") as conn:
+                conns.append(conn)
+
+        asyncio.run(run())
+        # Connection should be closed — attempting to use it should raise
+        with pytest.raises(Exception):
+            conns[0].execute("SELECT 1")
+
+    def test_async_get_db_does_not_block_event_loop(self, tmp_path):
+        """async_get_db should allow other coroutines to run concurrently."""
+        import asyncio
+
+        from jobhaul.db import async_get_db
+
+        async def run():
+            progress = []
+
+            async def background():
+                progress.append("started")
+
+            # Schedule background task, then open DB
+            task = asyncio.create_task(background())
+            async with async_get_db(tmp_path / "async_noblock.db") as conn:
+                await task
+                conn.execute("SELECT 1")
+            return progress
+
+        progress = asyncio.run(run())
+        assert "started" in progress

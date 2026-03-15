@@ -16,7 +16,7 @@ from rich.table import Table
 
 from jobhaul.config import init_profile, load_profile
 from jobhaul.constants import MAX_COMPANY_DISPLAY_CHARS, MAX_TITLE_DISPLAY_CHARS
-from jobhaul.db import get_db
+from jobhaul.db import async_get_db, get_db
 from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
@@ -57,7 +57,7 @@ async def _scan(
     profile = load_profile()
     flags = profile.get_effective_flags()
 
-    with get_db() as conn:
+    async with async_get_db() as conn:
         if retry_failed:
             await _handle_retry_failed(profile, conn, limit)
             return
@@ -310,7 +310,7 @@ async def _analyze(listing_id: int, all_: bool, limit: int | None):
     adapter = ClaudeCliAdapter(model=profile.llm.model)
     profile_hash = compute_profile_hash(profile)
 
-    with get_db() as conn:
+    async with async_get_db() as conn:
         if all_:
             unanalyzed = get_unanalyzed_listings(conn, profile_hash, limit=limit)
             if not unanalyzed:
