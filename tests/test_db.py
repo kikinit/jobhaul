@@ -20,7 +20,7 @@ from jobhaul.db.queries import (
     save_analysis,
     upsert_listing,
 )
-from jobhaul.db.schema import SCHEMA_VERSION, init_db, run_migrations
+from jobhaul.db.schema import SCHEMA_VERSION, _is_new_db, init_db, run_migrations
 from jobhaul.models import AnalysisResult, RawListing
 
 
@@ -1069,4 +1069,243 @@ class TestMigrateV3ToV5:
 
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert version == SCHEMA_VERSION
+        conn.close()
+
+
+# V8 schema: listing_sources WITHOUT UNIQUE(listing_id, source) constraint
+V8_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS listings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    description TEXT,
+    url TEXT,
+    published_at TEXT,
+    is_remote INTEGER DEFAULT 0,
+    employment_type TEXT,
+    seniority_level TEXT,
+    salary TEXT,
+    application_deadline TEXT,
+    listing_status TEXT DEFAULT 'active',
+    dedup_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS listing_sources (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    source_url TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    match_score INTEGER NOT NULL,
+    match_reasons TEXT,
+    missing_skills TEXT,
+    strengths TEXT,
+    concerns TEXT,
+    summary TEXT,
+    application_notes TEXT,
+    analysis_error TEXT,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    profile_hash TEXT NOT NULL,
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(listing_id, profile_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_listing_sources_listing_id
+    ON listing_sources(listing_id);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def _make_v8_db(db_path: str) -> sqlite3.Connection:
+    """Create a DB with V8 schema (no UNIQUE(listing_id, source) on listing_sources)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(V8_SCHEMA_SQL)
+    conn.execute("INSERT INTO schema_version (version) VALUES (8)")
+    conn.commit()
+    return conn
+
+
+class TestMigrateV8ToV9:
+    """Test v8 -> v9 migration adds UNIQUE(listing_id, source) to listing_sources."""
+
+    def test_migrate_v8_adds_unique_constraint(self, tmp_path):
+        db_path = str(tmp_path / "v8.db")
+        conn = _make_v8_db(db_path)
+
+        # Insert a listing and duplicate source rows
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (1, 'Dev', 'Co', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e1')"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e2')"
+        )
+        conn.commit()
+
+        # Verify duplicates exist before migration
+        count = conn.execute("SELECT COUNT(*) as c FROM listing_sources WHERE listing_id = 1 AND source = 'indeed'").fetchone()["c"]
+        assert count == 2
+
+        run_migrations(conn)
+
+        # After migration, only one row per (listing_id, source) should remain
+        count = conn.execute("SELECT COUNT(*) as c FROM listing_sources WHERE listing_id = 1 AND source = 'indeed'").fetchone()["c"]
+        assert count == 1
+
+        # Verify UNIQUE constraint is enforced
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e3')"
+            )
+
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+        conn.close()
+
+    def test_migrate_v8_preserves_distinct_sources(self, tmp_path):
+        db_path = str(tmp_path / "v8_distinct.db")
+        conn = _make_v8_db(db_path)
+
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (1, 'Dev', 'Co', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e1')"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'jooble', 'j1')"
+        )
+        conn.commit()
+
+        run_migrations(conn)
+
+        # Both distinct sources should be preserved
+        count = conn.execute("SELECT COUNT(*) as c FROM listing_sources WHERE listing_id = 1").fetchone()["c"]
+        assert count == 2
+        conn.close()
+
+    def test_insert_or_ignore_on_duplicate_listing_source(self, tmp_path):
+        """After migration, INSERT OR IGNORE should silently skip duplicates."""
+        db_path = str(tmp_path / "v8_ignore.db")
+        conn = _make_v8_db(db_path)
+
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (1, 'Dev', 'Co', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e1')"
+        )
+        conn.commit()
+
+        run_migrations(conn)
+
+        # INSERT OR IGNORE should not raise
+        conn.execute(
+            "INSERT OR IGNORE INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e99')"
+        )
+        conn.commit()
+
+        # Still only one row
+        count = conn.execute("SELECT COUNT(*) as c FROM listing_sources WHERE listing_id = 1 AND source = 'indeed'").fetchone()["c"]
+        assert count == 1
+        conn.close()
+
+
+# -- Issue #21 tests: init_db on existing databases ----------------------------
+
+
+class TestInitDbExistingDatabase:
+    """Test that init_db does NOT re-run SCHEMA_SQL on existing databases."""
+
+    def test_is_new_db_on_empty(self, tmp_path):
+        db_path = str(tmp_path / "empty.db")
+        conn = sqlite3.connect(db_path)
+        assert _is_new_db(conn) is True
+        conn.close()
+
+    def test_is_new_db_on_existing(self, tmp_path):
+        db_path = str(tmp_path / "existing.db")
+        conn = init_db(db_path)
+        assert _is_new_db(conn) is False
+        conn.close()
+
+    def test_init_db_on_v8_db_does_not_crash(self, tmp_path):
+        """init_db on a v8 DB should run migrations, not SCHEMA_SQL."""
+        db_path = str(tmp_path / "v8_init.db")
+        conn = _make_v8_db(db_path)
+        conn.execute(
+            "INSERT INTO listings (id, title, company, created_at) VALUES (1, 'Dev', 'Co', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO listing_sources (listing_id, source, external_id) VALUES (1, 'indeed', 'e1')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-open via init_db — should apply migration v9, not crash
+        conn = init_db(db_path)
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+
+        # Data should still be there
+        count = conn.execute("SELECT COUNT(*) as c FROM listings").fetchone()["c"]
+        assert count == 1
+        conn.close()
+
+    def test_init_db_twice_is_safe(self, tmp_path):
+        """Calling init_db twice on the same DB should not error."""
+        db_path = str(tmp_path / "twice.db")
+        conn1 = init_db(db_path)
+        conn1.close()
+
+        conn2 = init_db(db_path)
+        version = conn2.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+        conn2.close()
+
+
+# -- Issue #22 tests: thread-safety -------------------------------------------
+
+
+class TestThreadSafety:
+    """Test that connections from init_db can be used across threads."""
+
+    def test_check_same_thread_false(self, tmp_path):
+        """init_db connections should be usable from a different thread."""
+        import threading
+
+        db_path = str(tmp_path / "thread.db")
+        conn = init_db(db_path)
+
+        results = []
+
+        def worker():
+            try:
+                row = conn.execute("SELECT COUNT(*) as c FROM listings").fetchone()
+                results.append(("ok", row["c"]))
+            except Exception as e:
+                results.append(("error", str(e)))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        assert results[0][0] == "ok"
         conn.close()

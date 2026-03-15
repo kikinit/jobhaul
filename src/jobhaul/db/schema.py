@@ -15,7 +15,7 @@ from jobhaul.log import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 MIGRATIONS = {
     2: "ALTER TABLE analyses ADD COLUMN analysis_error TEXT",
@@ -25,6 +25,24 @@ MIGRATIONS = {
     6: "ALTER TABLE listings ADD COLUMN seniority_level TEXT",
     7: "ALTER TABLE listings ADD COLUMN salary TEXT",
     8: "ALTER TABLE listings ADD COLUMN dedup_key TEXT",
+    9: [
+        """CREATE TABLE IF NOT EXISTS listing_sources_new (
+            listing_id INTEGER NOT NULL REFERENCES listings(id),
+            source TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            source_url TEXT,
+            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (source, external_id),
+            UNIQUE(listing_id, source)
+        )""",
+        """INSERT OR IGNORE INTO listing_sources_new
+           SELECT DISTINCT listing_id, source, external_id, source_url, fetched_at
+           FROM listing_sources""",
+        "DROP TABLE listing_sources",
+        "ALTER TABLE listing_sources_new RENAME TO listing_sources",
+        """CREATE INDEX IF NOT EXISTS idx_listing_sources_listing_id
+           ON listing_sources(listing_id)""",
+    ],
 }
 
 SCHEMA_SQL = """
@@ -52,7 +70,8 @@ CREATE TABLE IF NOT EXISTS listing_sources (
     external_id TEXT NOT NULL,
     source_url TEXT,
     fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (source, external_id)
+    PRIMARY KEY (source, external_id),
+    UNIQUE(listing_id, source)
 );
 
 CREATE TABLE IF NOT EXISTS analyses (
@@ -109,7 +128,12 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     ).fetchone()[0]
     for version in sorted(MIGRATIONS):
         if version > current:
-            conn.execute(MIGRATIONS[version])
+            migration = MIGRATIONS[version]
+            if isinstance(migration, list):
+                for stmt in migration:
+                    conn.execute(stmt)
+            else:
+                conn.execute(migration)
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)", (version,)
             )
@@ -140,6 +164,14 @@ def _backfill_dedup_keys(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _is_new_db(conn: sqlite3.Connection) -> bool:
+    """Return True if the database has no tables yet (brand-new file)."""
+    row = conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    return row[0] == 0
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     """Create the database (if needed), apply migrations, and return a connection.
 
@@ -156,22 +188,20 @@ def init_db(db_path: str) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with ``row_factory`` set to
         ``sqlite3.Row`` so that columns can be accessed by name.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA_SQL)
-    conn.commit()
 
-    # Stamp current version on a brand-new database so migrations are skipped
-    row_count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
-    if row_count == 0:
+    if _is_new_db(conn):
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
         )
         conn.commit()
-
-    run_migrations(conn)
+    else:
+        run_migrations(conn)
 
     logger.info("Database initialized at %s", db_path)
     return conn
